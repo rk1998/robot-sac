@@ -248,7 +248,11 @@ class DeepQNetworkAgent {
           [np.arange(batchSize, dtype: np.int32), npActionBatch], axis: 1)
         let tfFullIndices = Tensor<Int32>(numpy: npFullIndices)!
         let stateQValueBatch = qNet(tfStateBatch)
+        print("stateqvalue")
+        print(stateQValueBatch.shape)
         let predictionBatch = stateQValueBatch.dimensionGathering(atIndices: tfFullIndices)
+        print("predictions")
+        print(predictionBatch.shape)
 
         // Compute target batch
         let nextStateQValueBatch: Tensor<Float>
@@ -458,7 +462,7 @@ while episodeIndex < maxEpisode {
           stepIndex, epsilon, Int(episodeReturn), Int(evalEpisodeReturn)))
       bestReturn = evalEpisodeReturn
     }
-    if evalEpisodeReturn > 199 {
+    if evalEpisodeReturn > 399 {
       print("Solved in \(episodeIndex) episodes with \(stepIndex) steps!")
       break
     }

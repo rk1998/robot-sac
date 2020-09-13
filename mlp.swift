@@ -1,4 +1,9 @@
+import PythonKit
+PythonLibrary.useVersion(3, 6)
 import TensorFlow
+let plt = Python.import("matplotlib.pyplot")
+let np = Python.import("numpy")
+let gym = Python.import("gym")
 struct MultiLayeredNetwork : Layer {
   typealias Input = Tensor<Float>
   typealias Output = Tensor<Float>
@@ -30,7 +35,12 @@ struct MultiLayeredNetwork : Layer {
 
 }
 
-let network = MultiLayeredNetwork(observationSize: 4, hiddenLayerSizes: [400, 300], outDimension: 1)
+let state: Tensor<Float> = Tensor<Float>([0.1, 0.3, 0.4])
+print(state.shape)
+let tfState = Tensor<Float>(numpy: np.expand_dims(state.makeNumpyArray(), axis: 0))!
+let network = MultiLayeredNetwork(observationSize: 3, hiddenLayerSizes: [400, 300], outDimension: 1)
+let output = network(tfState)
+print(output)
 let weights: [Tensor<Float>] = network.weight
 for i in 0..<network.weight.count {
     print(network.weight[i].shape)
