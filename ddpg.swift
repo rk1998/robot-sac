@@ -348,8 +348,8 @@ class ActorCritic {
         let predicted_q_values = critic_network([states, actions])
         let predicted_q_values_batch = predicted_q_values.dimensionGathering(atIndices: tfFullIndices)
 
-        let target_actions = self.target_actor_network(nextstates)
-        let next_state_q_values = withoutDerivative(at: self.target_critic_network([nextstates, target_actions]))
+        //let target_actions = self.target_actor_network(nextstates)
+        let next_state_q_values = withoutDerivative(at: self.target_critic_network([nextstates, self.target_actor_network(nextstates)]))
         let target_q_values: Tensor<Float> = rewards + self.gamma * (1 - Tensor<Float>(dones)) * next_state_q_values
         let td_error: Tensor<Float> = target_q_values - predicted_q_values_batch
         let td_loss: Tensor<Float> = 0.5*pow(td_error, 2)
@@ -361,7 +361,7 @@ class ActorCritic {
 
       let(actor_loss, actor_gradients) = valueWithGradient(at: actor_network) { actor_network -> Tensor<Float> in
           let next_actions = actor_network(states)
-          let loss: Tensor<Float> = self.critic_network([states, next_actions]).mean()
+          let loss: Tensor<Float> = -self.critic_network([states, next_actions]).mean()
           return loss.mean()
       }
       self.actor_optimizer.update(&self.actor_network, along: actor_gradients)
@@ -492,7 +492,9 @@ func evaluate_agent(agent: ActorCritic, env: TensorFlowEnvironmentWrapper, num_s
     env.originalEnv.render()
     let action = agent.get_action(state: state, epsilon: 0.0, env: env)
     let (next_state, reward, _, _) = env.step(action)
-    totalReward += reward.scalarized()
+    let scalar_reward = reward.scalarized()
+    print("\nStep Reward: \(scalar_reward)")
+    totalReward += scalar_reward
     state = next_state
   }
   env.originalEnv.close()
@@ -503,20 +505,20 @@ func evaluate_agent(agent: ActorCritic, env: TensorFlowEnvironmentWrapper, num_s
 //train actor critic on pendulum environment
 let env = TensorFlowEnvironmentWrapper(gym.make("Pendulum-v0"))
 let max_action: Float = 2.0
-let actor_net: ActorNetwork = ActorNetwork(observationSize: 3, actionSize: 1, hiddenLayerSizes: [300, 200], maximum_action:max_action)
-let actor_target: ActorNetwork = ActorNetwork(observationSize: 3, actionSize: 1, hiddenLayerSizes: [300, 200])
-let critic_net: CriticNetwork = CriticNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [300, 200], outDimension: 1)
-let critic_target: CriticNetwork = CriticNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [300, 200], outDimension: 1)
+let actor_net: ActorNetwork = ActorNetwork(observationSize: 3, actionSize: 1, hiddenLayerSizes: [64, 32], maximum_action:max_action)
+let actor_target: ActorNetwork = ActorNetwork(observationSize: 3, actionSize: 1, hiddenLayerSizes: [64, 32])
+let critic_net: CriticNetwork = CriticNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [64, 32], outDimension: 1)
+let critic_target: CriticNetwork = CriticNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [64, 32], outDimension: 1)
 let actor_critic: ActorCritic = ActorCritic(actor: actor_net,
                                             actor_target: actor_target,
                                             critic: critic_net,
                                             critic_target: critic_target,
-                                          stateSize: 3, actionSize: 1, gamma: 0.95)
+                                          stateSize: 3, actionSize: 1, gamma: 0.99)
 
 let(totalRewards, actor_losses, critic_losses)
   = ddpg(actor_critic: actor_critic,
         env: env,
-        maxEpisodes: 1000,
+        maxEpisodes: 1200,
         stepsPerEpisode: 200,
         tau: 0.001,
         epsilonStart: 0.95,
@@ -528,7 +530,7 @@ plt.plot(totalRewards)
 plt.title("DDPG on Pendulum-v0 Rewards")
 plt.xlabel("Episode")
 plt.ylabel("Total Reward")
-plt.savefig("results/pendulum-ddpgreward.png")
+plt.savefig("results/pendulum-ddpgreward-2.png")
 plt.clf()
 
 // Save smoothed learning curve
@@ -540,7 +542,7 @@ plt.plot(smoothedEpisodeReturns)
 plt.title("DDPG on Pendulum-v0 Smoothed Rewards")
 plt.xlabel("Episode")
 plt.ylabel("Smoothed Episode Reward")
-plt.savefig("results/pendulum-ddpgsmoothedreward.png")
+plt.savefig("results/pendulum-ddpgsmoothedreward-2.png")
 plt.clf()
 
 //save actor and critic losses
@@ -548,7 +550,7 @@ plt.plot(critic_losses)
 plt.title("DDPG on Pendulum-v0 critic losses")
 plt.xlabel("Episode")
 plt.ylabel("TD Loss")
-plt.savefig("results/ddpg-critic-losses.png")
+plt.savefig("results/ddpg-critic-losses-2.png")
 plt.clf()
 
 
@@ -556,5 +558,5 @@ plt.plot(actor_losses)
 plt.title("DDPG on Pendulum-v0 actor losses")
 plt.xlabel("Episode")
 plt.ylabel("Loss")
-plt.savefig("results/ddpg-actor-losses.png")
+plt.savefig("results/ddpg-actor-losses-2.png")
 plt.clf()
