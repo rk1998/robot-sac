@@ -172,11 +172,15 @@ class TensorFlowEnvironmentWrapper {
     return (tfState, tfReward, tfIsDone, info)
   }
 
-	func action_sample() -> Tensor<Float> {
-		let action = originalEnv.action_space.sample()
-		let tfAction = Tensor<Float>(numpy: np.array(action, dtype: np.float32))!
-		return tfAction
-	}
+  func set_environment_seed(seed: Int) {
+    self.originalEnv.seed(seed)
+  }
+
+  func action_sample() -> Tensor<Float> {
+    let action = originalEnv.action_space.sample()
+    let tfAction = Tensor<Float>(numpy: np.array(action, dtype: np.float32))!
+    return tfAction
+  }
 }
 
 struct CriticNetwork: Layer {
@@ -232,6 +236,7 @@ struct ActorNetwork: Layer {
 //Actor Critic Agent
 class ActorCritic {
 
+
   public var actor_network: ActorNetwork
 
   public var critic_network: CriticNetwork
@@ -263,9 +268,9 @@ class ActorCritic {
     critic_target: CriticNetwork,
     stateSize: Int,
     actionSize: Int,
-    critic_lr: Float = 0.001,
-    actor_lr: Float = 0.0001,
-  gamma: Float = 0.95) {
+    critic_lr: Float = 0.0001,
+    actor_lr: Float = 0.00001,
+    gamma: Float = 0.95) {
       self.actor_network = actor
       self.critic_network = critic
       self.target_critic_network = critic_target
@@ -277,10 +282,7 @@ class ActorCritic {
       self.action_size = actionSize
       self.actor_optimizer = Adam(for: self.actor_network, learningRate: actor_lr)
       self.critic_optimizer = Adam(for: self.critic_network, learningRate: critic_lr)
-      self.replayBuffer = ReplayBuffer(capacity: 1000, combined: false)
-      updateCriticTargetNetwork(tau: 1.0)
-      updateActorTargetNetwork(tau: 1.0)
-
+      self.replayBuffer = ReplayBuffer(capacity: 5000, combined: false)
   }
 
   func remember(state: Tensor<Float>, action: Tensor<Float>, reward: Tensor<Float>, next_state: Tensor<Float>, dones: Tensor<Bool>) {
@@ -288,12 +290,12 @@ class ActorCritic {
   }
 
   func get_action(state: Tensor<Float>, env: TensorFlowEnvironmentWrapper, training: Bool, random_sample: Bool = false) -> Tensor<Float> {
-		if random_sample {
-			let action = env.action_sample()
-			return action
-		} else {
+    if random_sample {
+      let action = env.action_sample()
+      return action
+    } else {
       let tfState = Tensor<Float>(numpy: np.expand_dims(state.makeNumpyArray(), axis: 0))!
-			let net_action: Tensor<Float> = self.actor_network(tfState)
+      let net_action: Tensor<Float> = self.actor_network(tfState)
       if training {
         let noisy_action = withoutDerivative(at: self.action_noise(net_action))
         let action = noisy_action.clipped(min:-2.0, max:2.0)
@@ -301,7 +303,7 @@ class ActorCritic {
       } else {
         return net_action[0]
       }
-		}
+    }
   }
 
   func train_actor_critic(batchSize: Int, iterationNum: Int) -> (Float, Float) {
@@ -309,7 +311,7 @@ class ActorCritic {
     let (states, actions, rewards, nextstates, dones) = self.replayBuffer.sample(batchSize: batchSize)
     //train critic
     let(critic_loss, critic_gradients) = valueWithGradient(at: critic_network) { critic_network -> Tensor<Float> in
-			let npFullIndices = np.stack(
+      let npFullIndices = np.stack(
         [np.arange(batchSize, dtype: np.int32)], axis: 1)
       let tfFullIndices = Tensor<Int32>(numpy: npFullIndices)!
       let predicted_q_values = critic_network([states, actions])
@@ -321,8 +323,7 @@ class ActorCritic {
       let td_error: Tensor<Float> = target_q_values - predicted_q_values_batch
       let td_loss: Tensor<Float> = 0.5*pow(td_error, 2)
       return td_loss.mean()
-      //return huberLoss(predicted: predicted_q_values_batch, expected: target_q_values, delta: 1).mean()
-
+      //return huberLoss(predicted: predicted_q_values_batch, expected: target_q_values, delta: 2.5).mean()
     }
     self.critic_optimizer.update(&self.critic_network, along: critic_gradients)
     //train actor
@@ -332,77 +333,78 @@ class ActorCritic {
         let loss: Tensor<Float> = -1.0 * critic_q_values
         return loss
     }
+    //print(actor_gradients)
     self.actor_optimizer.update(&self.actor_network, along: actor_gradients)
     return (actor_loss.scalarized(), critic_loss.scalarized())
+  }
 
+  func updateCriticTargetNetwork(tau: Float) {
+    //update layer 1
+    self.target_critic_network.layer_1.weight =
+              tau * Tensor<Float>(self.critic_network.layer_1.weight) + (1 - tau) * self.target_critic_network.layer_1.weight
+    self.target_critic_network.layer_1.bias =
+              tau * Tensor<Float>(self.critic_network.layer_1.bias) + (1 - tau) * self.target_critic_network.layer_1.bias
+    //update layer 2
+    self.target_critic_network.layer_2.weight =
+              tau * Tensor<Float>(self.critic_network.layer_2.weight) + (1 - tau) * self.target_critic_network.layer_2.weight
+    self.target_critic_network.layer_2.bias =
+              tau * Tensor<Float>(self.critic_network.layer_2.bias) + (1 - tau) * self.target_critic_network.layer_2.bias
+    //update layer 3
+    self.target_critic_network.layer_3.weight =
+              tau * Tensor<Float>(self.critic_network.layer_3.weight) + (1 - tau) * self.target_critic_network.layer_3.weight
+    self.target_critic_network.layer_3.bias =
+              tau * Tensor<Float>(self.critic_network.layer_3.bias) + (1 - tau) * self.target_critic_network.layer_3.bias
 
   }
 
+  func updateActorTargetNetwork(tau: Float) {
+    //update layer 1
+    self.target_actor_network.layer_1.weight =
+              tau * Tensor<Float>(self.actor_network.layer_1.weight) + (1 - tau) * self.target_actor_network.layer_1.weight
+    self.target_actor_network.layer_1.bias =
+              tau * Tensor<Float>(self.actor_network.layer_1.bias) + (1 - tau) * self.target_actor_network.layer_1.bias
+    //update layer 2
+    self.target_actor_network.layer_2.weight =
+              tau * Tensor<Float>(self.actor_network.layer_2.weight) + (1 - tau) * self.target_actor_network.layer_2.weight
+    self.target_actor_network.layer_2.bias =
+              tau * Tensor<Float>(self.actor_network.layer_2.bias) + (1 - tau) * self.target_actor_network.layer_2.bias
+    //update layer 3
+    self.target_actor_network.layer_3.weight =
+              tau * Tensor<Float>(self.actor_network.layer_3.weight) + (1 - tau) * self.target_actor_network.layer_3.weight
+    self.target_actor_network.layer_3.bias =
+              tau * Tensor<Float>(self.actor_network.layer_3.bias) + (1 - tau) * self.target_actor_network.layer_3.bias
+  }
 
-    func updateCriticTargetNetwork(tau: Float) {
-      //update layer 1
-      self.target_critic_network.layer_1.weight =
-                tau * Tensor<Float>(self.critic_network.layer_1.weight) + (1 - tau) * self.target_critic_network.layer_1.weight
-      self.target_critic_network.layer_1.bias =
-                tau * Tensor<Float>(self.critic_network.layer_1.bias) + (1 - tau) * self.target_critic_network.layer_1.bias
-      //update layer 2
-      self.target_critic_network.layer_2.weight =
-                tau * Tensor<Float>(self.critic_network.layer_2.weight) + (1 - tau) * self.target_critic_network.layer_2.weight
-      self.target_critic_network.layer_2.bias =
-                tau * Tensor<Float>(self.critic_network.layer_2.bias) + (1 - tau) * self.target_critic_network.layer_2.bias
-      //update layer 3
-      self.target_critic_network.layer_3.weight =
-                tau * Tensor<Float>(self.critic_network.layer_3.weight) + (1 - tau) * self.target_critic_network.layer_3.weight
-      self.target_critic_network.layer_3.bias =
-                tau * Tensor<Float>(self.critic_network.layer_3.bias) + (1 - tau) * self.target_critic_network.layer_3.bias
-
-    }
-
-    func updateActorTargetNetwork(tau: Float) {
-      //update layer 1
-      self.target_actor_network.layer_1.weight =
-                tau * Tensor<Float>(self.actor_network.layer_1.weight) + (1 - tau) * self.target_actor_network.layer_1.weight
-      self.target_actor_network.layer_1.bias =
-                tau * Tensor<Float>(self.actor_network.layer_1.bias) + (1 - tau) * self.target_actor_network.layer_1.bias
-      //update layer 2
-      self.target_actor_network.layer_2.weight =
-                tau * Tensor<Float>(self.actor_network.layer_2.weight) + (1 - tau) * self.target_actor_network.layer_2.weight
-      self.target_actor_network.layer_2.bias =
-                tau * Tensor<Float>(self.actor_network.layer_2.bias) + (1 - tau) * self.target_actor_network.layer_2.bias
-      //update layer 3
-      self.target_actor_network.layer_3.weight =
-                tau * Tensor<Float>(self.actor_network.layer_3.weight) + (1 - tau) * self.target_actor_network.layer_3.weight
-      self.target_actor_network.layer_3.bias =
-                tau * Tensor<Float>(self.actor_network.layer_3.bias) + (1 - tau) * self.target_actor_network.layer_3.bias
-    }
  }
 
 
 func ddpg(actor_critic: ActorCritic, env: TensorFlowEnvironmentWrapper,
           maxEpisodes: Int = 1000, batchSize: Int = 32,
           stepsPerEpisode: Int = 300, tau: Float = 0.001,
-          update_every: Int = 2, epsilonStart: Float = 0.99,
+          update_every: Int = 10, epsilonStart: Float = 0.99,
           epsilonEnd:Float = 0.01, epsilonDecay: Float = 1000) ->([Float], [Float], [Float]) {
-
     var totalRewards: [Float] = []
-		var actor_losses: [Float] = []
-		var critic_losses: [Float] = []
-		var bestReward: Float = -99999999.0
+    var actor_losses: [Float] = []
+    var critic_losses: [Float] = []
+    var bestReward: Float = -99999999.0
     var sample_random_action: Bool = true
+    let sampling_episodes: Int = maxEpisodes / 8
+    actor_critic.updateCriticTargetNetwork(tau: 1.0)
+    actor_critic.updateActorTargetNetwork(tau: 1.0)
     for i in 0..<maxEpisodes {
-
-			print("\nEpisode: \(i)")
-			var state = env.reset()
+      print("\nEpisode: \(i)")
+      var state = env.reset()
       print(state)
       //sample random actions for the first few episodes, then start using actor network w/ noise
-      if i > 50 {
+
+      if i > sampling_episodes {
         sample_random_action = false
       }
-
-			var totalReward: Float = 0
+      var totalReward: Float = 0
       var totalActorLoss: Float = 0
       var totalCriticLoss: Float = 0
-			for j in 0..<stepsPerEpisode {
+      var totalTrainingSteps: Int = 0
+      for j in 0..<stepsPerEpisode {
         // let epsilon: Float
         // if j > 10 {
         //   //epsilon decay
@@ -410,42 +412,47 @@ func ddpg(actor_critic: ActorCritic, env: TensorFlowEnvironmentWrapper,
         // } else {
         //   epsilon = epsilonStart
         // }
-				//Sample random action or take action from actor depending on epsilon
-				let action = actor_critic.get_action(state: state, env: env, training: true, random_sample: sample_random_action)
-				let(nextState, reward, isDone, _) = env.step(action)
-				totalReward += reward.scalarized()
-				//add (s, a, r, s') to actor_critic's replay buffer
-				actor_critic.remember(state:state, action:action, reward:reward, next_state:nextState, dones:isDone)
-				if actor_critic.replayBuffer.count > batchSize {
-					let(actor_loss, critic_loss) = actor_critic.train_actor_critic(batchSize: batchSize, iterationNum: j)
+        //Sample random action or take action from actor depending on epsilon
+        let action = actor_critic.get_action(state: state, env: env, training: true, random_sample: sample_random_action)
+        let(nextState, reward, isDone, _) = env.step(action)
+        totalReward += reward.scalarized()
+        //add (s, a, r, s') to actor_critic's replay buffer
+        actor_critic.remember(state:state, action:action, reward:reward, next_state:nextState, dones:isDone)
+        if actor_critic.replayBuffer.count > batchSize {
+          totalTrainingSteps += 1
+          //Train Actor and Critic Networks
+          let(actor_loss, critic_loss) = actor_critic.train_actor_critic(batchSize: batchSize, iterationNum: j)
           totalActorLoss += actor_loss
           totalCriticLoss += critic_loss
-					// actor_losses.append(actor_loss)
-					// critic_losses.append(critic_loss)
-				}
+        }
 
-        if j % update_every == 0 {
+        // if j % update_every == 0 {
+        //   actor_critic.updateCriticTargetNetwork(tau: tau)
+        //   actor_critic.updateActorTargetNetwork(tau: tau)
+        // }
+
+        state = nextState
+      }
+      if i % update_every == 0 {
           actor_critic.updateCriticTargetNetwork(tau: tau)
           actor_critic.updateActorTargetNetwork(tau: tau)
         }
-
-				state = nextState
-			}
-			if totalReward > bestReward {
-				bestReward = totalReward
-			}
-			print(String(format: "Episode: %4d | Total Reward %.03f | Best Reward: %.03f", i, totalReward, bestReward))
-			totalRewards.append(totalReward)
-      let avgActorLoss: Float = totalActorLoss/Float(maxEpisodes)
-      let avgCriticLoss: Float = totalCriticLoss/Float(maxEpisodes)
+      if totalReward > bestReward {
+        bestReward = totalReward
+      }
+      totalRewards.append(totalReward)
+      let avgActorLoss: Float = totalActorLoss/Float(totalTrainingSteps)
+      let avgCriticLoss: Float = totalCriticLoss/Float(totalTrainingSteps)
       actor_losses.append(avgActorLoss)
       critic_losses.append(avgCriticLoss)
-			if bestReward > 50 {
-				print("Solved in \(i) episodes")
-				break
-			}
+      print(String(format: "Episode: %4d | Total Reward %.03f | Best Reward: %.03f | Avg. Actor Loss: %.03f | Avg. Critic Loss: %.03f",
+        i, totalReward, bestReward, avgActorLoss, avgCriticLoss))
+      if bestReward > -200 {
+        print("Solved in \(i) episodes")
+        break
+      }
     }
-		print("Finished Training")
+    print("Finished Training")
     return (totalRewards, actor_losses, critic_losses)
 }
 
@@ -466,13 +473,14 @@ func evaluate_agent(agent: ActorCritic, env: TensorFlowEnvironmentWrapper, num_s
   }
   env.originalEnv.close()
   let frame_np_array = np.array(frames)
-  np.save("results/ddpg_pendulum_frames.npy", frame_np_array)
+  np.save("results/ddpg_pendulum_frames_5.npy", frame_np_array)
   print("\n Total Reward: \(totalReward)")
 }
 
 
 //train actor critic on pendulum environment
 let env = TensorFlowEnvironmentWrapper(gym.make("Pendulum-v0"))
+env.set_environment_seed(seed:1001)
 let max_action: Float = 2.0
 let actor_net: ActorNetwork = ActorNetwork(observationSize: 3, actionSize: 1, hiddenLayerSizes: [400, 300], maximum_action:max_action)
 let actor_target: ActorNetwork = ActorNetwork(observationSize: 3, actionSize: 1, hiddenLayerSizes: [400, 300])
@@ -482,12 +490,12 @@ let actor_critic: ActorCritic = ActorCritic(actor: actor_net,
                                             actor_target: actor_target,
                                             critic: critic_net,
                                             critic_target: critic_target,
-                                          stateSize: 3, actionSize: 1, gamma: 0.99)
+                                            stateSize: 3, actionSize: 1, gamma: 0.99)
 
 let(totalRewards, actor_losses, critic_losses)
   = ddpg(actor_critic: actor_critic,
         env: env,
-        maxEpisodes: 1500,
+        maxEpisodes: 1200,
         stepsPerEpisode: 200,
         tau: 0.001,
         epsilonStart: 0.95,
@@ -499,7 +507,7 @@ plt.plot(totalRewards)
 plt.title("DDPG on Pendulum-v0 Rewards")
 plt.xlabel("Episode")
 plt.ylabel("Total Reward")
-plt.savefig("results/pendulum-ddpgreward-3.png")
+plt.savefig("results/pendulum-ddpgreward-5.png")
 plt.clf()
 
 // Save smoothed learning curve
@@ -511,7 +519,7 @@ plt.plot(smoothedEpisodeReturns)
 plt.title("DDPG on Pendulum-v0 Smoothed Rewards")
 plt.xlabel("Episode")
 plt.ylabel("Smoothed Episode Reward")
-plt.savefig("results/pendulum-ddpgsmoothedreward-3.png")
+plt.savefig("results/pendulum-ddpgsmoothedreward-5.png")
 plt.clf()
 
 //save actor and critic losses
@@ -519,7 +527,7 @@ plt.plot(critic_losses)
 plt.title("DDPG on Pendulum-v0 critic losses")
 plt.xlabel("Episode")
 plt.ylabel("TD Loss")
-plt.savefig("results/ddpg-critic-losses-3.png")
+plt.savefig("results/ddpg-critic-losses-5.png")
 plt.clf()
 
 
@@ -527,5 +535,5 @@ plt.plot(actor_losses)
 plt.title("DDPG on Pendulum-v0 actor losses")
 plt.xlabel("Episode")
 plt.ylabel("Loss")
-plt.savefig("results/ddpg-actor-losses-3.png")
+plt.savefig("results/ddpg-actor-losses-5.png")
 plt.clf()
