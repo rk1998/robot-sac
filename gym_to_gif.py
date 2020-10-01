@@ -26,9 +26,10 @@ def save_frames_as_gif(frames, path='./', filename='gym_animation.gif'):
 
 def main():
     filename = sys.argv[1]
+    gif_filename = sys.argv[2]
     frames = np.load(filename)
     print(frames.shape)
-    save_frames_as_gif(frames, path="results/", filename="ddpg_pendulum.gif")
+    save_frames_as_gif(frames, path="results/", filename=gif_filename)
 
 if __name__ == '__main__':
     main()

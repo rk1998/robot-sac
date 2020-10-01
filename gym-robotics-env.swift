@@ -7,7 +7,7 @@ let np = Python.import("numpy")
 let gym = Python.import("gym")
 
 func randomStep(numSteps: Int) -> Int {
-    let env = gym.make("Pendulum-v0")
+    let env = gym.make("FetchPush-v1")
     env.reset()
     for _ in 0..<numSteps {
       env.render()
