@@ -309,7 +309,7 @@ class ActorCritic {
     critic_target: CriticNetwork,
     stateSize: Int,
     actionSize: Int,
-    critic_lr: Float = 0.00005,
+    critic_lr: Float = 0.00009,
     actor_lr: Float = 0.0001,
     gamma: Float = 0.95) {
       self.actor_network = actor
@@ -360,12 +360,12 @@ class ActorCritic {
       //get predicted q values from critic network
       let target_q_values_no_deriv : Tensor<Float> = withoutDerivative(at: target_q_values)
       let predicted_q_values: Tensor<Float> = critic_network([states, actions]).flattened()
-      let td_error: Tensor<Float> = target_q_values_no_deriv - predicted_q_values
+      //let td_error: Tensor<Float> = target_q_values_no_deriv - predicted_q_values
       // let td_error: Tensor<Float> = squaredDifference(target_q_values_no_deriv, predicted_q_values)
       // let td_loss: Tensor<Float> = td_error.mean()
-      let td_loss: Tensor<Float> = 0.5*pow(td_error, 2).mean()
-      return td_loss
-      //return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 5.0).mean()
+      //let td_loss: Tensor<Float> = 0.5*pow(td_error, 2).mean()
+      //return td_loss
+      return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 5.0).mean()
     }
     self.critic_optimizer.update(&self.critic_network, along: critic_gradients)
     //train actor
@@ -433,7 +433,7 @@ func ddpg(actor_critic: ActorCritic, env: TensorFlowEnvironmentWrapper,
     var bestReward: Float = -99999999.0
     //var sample_random_action: Bool = true
     var training: Bool = false
-    let sampling_episodes: Int = 50
+    let sampling_episodes: Int = 100
     actor_critic.updateCriticTargetNetwork(tau: 1.0)
     actor_critic.updateActorTargetNetwork(tau: 1.0)
     for i in 0..<maxEpisodes {
@@ -450,13 +450,6 @@ func ddpg(actor_critic: ActorCritic, env: TensorFlowEnvironmentWrapper,
       var totalActorLoss: Float = 0
       var totalCriticLoss: Float = 0
       var totalTrainingSteps: Int = 0
-      //let epsilon: Float
-      // if i > sampling_episodes {
-      //   //epsilon decay
-      //   epsilon = epsilonEnd + (epsilonStart - epsilonEnd) * exp(-1.0 * Float(i) / epsilonDecay)
-      // } else {
-      //   epsilon = epsilonStart
-      // }
       for j in 0..<stepsPerEpisode {
 
         var action: Tensor<Float>
@@ -466,11 +459,6 @@ func ddpg(actor_critic: ActorCritic, env: TensorFlowEnvironmentWrapper,
         } else {
           action = actor_critic.get_action(state: state , env: env , training: true)
         }
-        // if Float(np.random.uniform()).unwrapped() < epsilon  {
-        //   action = env.action_sample()
-        // } else {
-        //   action = actor_critic.get_action(state: state, env: env, training: true)
-        // }
         let(nextState, reward, isDone, _) = env.step(action)
         totalReward += reward.scalarized()
         //add (s, a, r, s') to actor_critic's replay buffer
@@ -542,7 +530,7 @@ func evaluate_agent(agent: ActorCritic, env: TensorFlowEnvironmentWrapper, num_s
   }
   env.originalEnv.close()
   let frame_np_array = np.array(frames)
-  np.save("results/ddpg_pendulum_frames_11.npy", frame_np_array)
+  np.save("results/ddpg_pendulum_frames_huberloss.npy", frame_np_array)
   print("\n Total Reward: \(totalReward)")
 }
 
@@ -564,7 +552,7 @@ Context.local.learningPhase = .training
 let(totalRewards, movingAvgReward, actor_losses, critic_losses)
   = ddpg(actor_critic: actor_critic,
         env: env,
-        maxEpisodes: 1500,
+        maxEpisodes: 1600,
         batchSize: 32,
         stepsPerEpisode: 200,
         tau: 0.005,
@@ -579,7 +567,7 @@ plt.plot(totalRewards)
 plt.title("DDPG on Pendulum-v0 Rewards")
 plt.xlabel("Episode")
 plt.ylabel("Total Reward")
-plt.savefig("results/rewards/pendulum-ddpgreward-11.png")
+plt.savefig("results/rewards/pendulum-ddpgreward-huberloss.png")
 plt.clf()
 
 // Save smoothed learning curve
@@ -591,7 +579,7 @@ plt.plot(smoothedEpisodeReturns)
 plt.title("DDPG on Pendulum-v0 Smoothed Rewards")
 plt.xlabel("Episode")
 plt.ylabel("Smoothed Episode Reward")
-plt.savefig("results/rewards/pendulum-ddpgsmoothedreward-11.png")
+plt.savefig("results/rewards/pendulum-ddpgsmoothedreward-huberloss.png")
 plt.clf()
 
 //save actor and critic losses
@@ -599,7 +587,7 @@ plt.plot(critic_losses)
 plt.title("DDPG on Pendulum-v0 critic losses")
 plt.xlabel("Episode")
 plt.ylabel("TD Loss")
-plt.savefig("results/losses/ddpg-critic-losses-11.png")
+plt.savefig("results/losses/ddpg-critic-losses-huberloss.png")
 plt.clf()
 
 
@@ -607,5 +595,5 @@ plt.plot(actor_losses)
 plt.title("DDPG on Pendulum-v0 actor losses")
 plt.xlabel("Episode")
 plt.ylabel("Loss")
-plt.savefig("results/losses/ddpg-actor-losses-11.png")
+plt.savefig("results/losses/ddpg-actor-losses-huberloss.png")
 plt.clf()
