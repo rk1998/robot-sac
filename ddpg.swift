@@ -556,7 +556,7 @@ let(totalRewards, movingAvgReward, actor_losses, critic_losses)
         batchSize: 32,
         stepsPerEpisode: 200,
         tau: 0.005,
-        update_every: 10,
+        update_every: 50,
         epsilonStart: 0.99,
         epsilonDecay: 150)
 
