@@ -552,7 +552,7 @@ Context.local.learningPhase = .training
 let(totalRewards, movingAvgReward, actor_losses, critic_losses)
   = ddpg(actor_critic: actor_critic,
         env: env,
-        maxEpisodes: 1600,
+        maxEpisodes: 1500,
         batchSize: 32,
         stepsPerEpisode: 200,
         tau: 0.005,
@@ -569,18 +569,21 @@ plt.xlabel("Episode")
 plt.ylabel("Total Reward")
 plt.savefig("results/rewards/pendulum-ddpgreward-huberloss.png")
 plt.clf()
-
+let totalRewards_arr = np.array(totalRewards)
+np.save("results/rewards/pendulum-ddpgreward-huberloss.npy", totalRewards)
 // Save smoothed learning curve
 let runningMeanWindow: Int = 10
 let smoothedEpisodeReturns = np.convolve(
   totalRewards, np.ones((runningMeanWindow)) / np.array(runningMeanWindow, dtype: np.int32),
   mode: "same")
-plt.plot(smoothedEpisodeReturns)
-plt.title("DDPG on Pendulum-v0 Smoothed Rewards")
+plt.plot(movingAvgReward)
+plt.title("DDPG on Pendulum-v0 Avg Rewards")
 plt.xlabel("Episode")
 plt.ylabel("Smoothed Episode Reward")
 plt.savefig("results/rewards/pendulum-ddpgsmoothedreward-huberloss.png")
 plt.clf()
+let avgRewards_arr = np.array(movingAvgReward)
+np.save("results/rewards/pendulum-ddpgavgreward-1.npy", avgRewards_arr)
 
 //save actor and critic losses
 plt.plot(critic_losses)
