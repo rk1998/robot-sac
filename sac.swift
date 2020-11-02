@@ -428,9 +428,9 @@ class SoftActorCritic {
     critic_v_target: CriticVNetwork,
     stateSize: Int,
     actionSize: Int,
-    critic_lr: Float = 0.00009,
+    critic_lr: Float = 0.0001,
     actor_lr: Float = 0.0001,
-    critic_v_lr: Float = 0.00001,
+    critic_v_lr: Float = 0.0001,
     alpha: Float = 0.2,
     gamma: Float = 0.95) {
       self.actor_network = actor
@@ -489,7 +489,10 @@ class SoftActorCritic {
       let target_q_values_no_deriv : Tensor<Float> = withoutDerivative(at: target_q_values)
       let predicted_q_values: Tensor<Float> = critic_q1([states, actions]).flattened()
 
-      return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 5.0).mean()
+      let td_error: Tensor<Float> = target_q_values_no_deriv - predicted_q_values
+      let td_loss: Tensor<Float> = 0.5*(pow(td_error, 2)).mean()
+      return td_loss
+      //return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 5.0).mean()
     }
     self.critic_q1_optimizer.update(&self.critic_q1, along: critic_q1_gradients)
 
@@ -501,8 +504,10 @@ class SoftActorCritic {
       //get predicted q values from critic network
       let target_q_values_no_deriv : Tensor<Float> = withoutDerivative(at: target_q_values)
       let predicted_q_values: Tensor<Float> = critic_q2([states, actions]).flattened()
-
-      return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 5.0).mean()
+      let td_error: Tensor<Float> = target_q_values_no_deriv - predicted_q_values
+      let td_loss: Tensor<Float> = 0.5*(pow(td_error, 2)).mean()
+      return td_loss
+      //return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 5.0).mean()
     }
     self.critic_q2_optimizer.update(&self.critic_q2, along: critic_q2_gradients)
 
@@ -537,10 +542,10 @@ class SoftActorCritic {
         let logp_pi: Tensor<Float> = actor_output[2]
 
         let current_q1: Tensor<Float> = self.critic_q1([states, sample_actions])
-        //let current_q2: Tensor<Float> = self.critic_q2([states, sample_actions])
-        //let minimum_q: Tensor<Float> = min(current_q1, current_q2)
+        let current_q2: Tensor<Float> = self.critic_q2([states, sample_actions])
+        let minimum_q: Tensor<Float> = min(current_q1, current_q2)
 
-        let error: Tensor<Float> = current_q1 - self.alpha * logp_pi
+        let error: Tensor<Float> = minimum_q - self.alpha * logp_pi
         let loss: Tensor<Float> = -1.0 * error.mean()
         return loss
     }
@@ -698,18 +703,18 @@ func evaluate_agent(agent: SoftActorCritic, env: TensorFlowEnvironmentWrapper, n
 let env = TensorFlowEnvironmentWrapper(gym.make("Pendulum-v0"))
 env.set_environment_seed(seed: 1001)
 let max_action: Tensor<Float> = Tensor<Float>(2.0)
-let actor_net: GaussianActorNetwork = GaussianActorNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [400, 300], maximum_action:max_action)
-let critic_q1: CriticQNetwork = CriticQNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [400, 300], outDimension: 1)
-let critic_q2: CriticQNetwork = CriticQNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [400, 300], outDimension: 1)
-let critic_v: CriticVNetwork = CriticVNetwork(state_size: 3, hiddenLayerSizes:[400, 300], outDimension: 1)
-let critic_v_target: CriticVNetwork = CriticVNetwork(state_size: 3, hiddenLayerSizes:[400, 300], outDimension: 1)
+let actor_net: GaussianActorNetwork = GaussianActorNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [300, 200], maximum_action:max_action)
+let critic_q1: CriticQNetwork = CriticQNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [300, 200], outDimension: 1)
+let critic_q2: CriticQNetwork = CriticQNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [300, 200], outDimension: 1)
+let critic_v: CriticVNetwork = CriticVNetwork(state_size: 3, hiddenLayerSizes:[300, 200], outDimension: 1)
+let critic_v_target: CriticVNetwork = CriticVNetwork(state_size: 3, hiddenLayerSizes:[300, 200], outDimension: 1)
 
 let actor_critic: SoftActorCritic = SoftActorCritic(actor: actor_net,
                                                     critic_1: critic_q1,
                                                     critic_2: critic_q2,
                                                     critic_v: critic_v,
                                                     critic_v_target: critic_v_target,
-                                                    stateSize: 3, actionSize: 1, alpha: 0.35, gamma: 0.99)
+                                                    stateSize: 3, actionSize: 1, alpha: 0.25, gamma: 0.99)
 let(totalRewards, movingAvgReward, actor_losses, critic_1_losses, critic_2_losses, value_losses)
   = sac_train(actor_critic: actor_critic,
         env: env,

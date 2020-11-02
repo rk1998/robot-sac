@@ -12,9 +12,11 @@ func randomStep(numSteps: Int) -> Int {
     for _ in 0..<numSteps {
       env.render()
       let action = env.action_space.sample()
-      print(action)
+      print("Action Size")
+      print(action.shape)
       let (state, reward, isDone, _) = env.step(action).tuple4
       print(state)
+      print("Reward")
       print(reward)
 
     }
