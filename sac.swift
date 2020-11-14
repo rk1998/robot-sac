@@ -430,7 +430,7 @@ class SoftActorCritic {
     actionSize: Int,
     critic_lr: Float = 0.0001,
     actor_lr: Float = 0.0001,
-    critic_v_lr: Float = 0.0001,
+    critic_v_lr: Float = 0.00009,
     alpha: Float = 0.2,
     gamma: Float = 0.95) {
       self.actor_network = actor
@@ -452,7 +452,7 @@ class SoftActorCritic {
       self.critic_q1_optimizer = Adam(for: self.critic_q1, learningRate: critic_lr)
       self.critic_q2_optimizer = Adam(for: self.critic_q2, learningRate: critic_lr)
       self.critic_v_optimizer = Adam(for: self.critic_v_network, learningRate: critic_v_lr)
-      self.replayBuffer = ReplayBuffer(capacity: 2000, combined: true)
+      self.replayBuffer = ReplayBuffer(capacity: 1100, combined: true)
   }
 
   func remember(state: Tensor<Float>, action: Tensor<Float>, reward: Tensor<Float>, next_state: Tensor<Float>, dones: Tensor<Bool>) {
@@ -703,11 +703,11 @@ func evaluate_agent(agent: SoftActorCritic, env: TensorFlowEnvironmentWrapper, n
 let env = TensorFlowEnvironmentWrapper(gym.make("Pendulum-v0"))
 env.set_environment_seed(seed: 1001)
 let max_action: Tensor<Float> = Tensor<Float>(2.0)
-let actor_net: GaussianActorNetwork = GaussianActorNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [300, 200], maximum_action:max_action)
-let critic_q1: CriticQNetwork = CriticQNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [300, 200], outDimension: 1)
-let critic_q2: CriticQNetwork = CriticQNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [300, 200], outDimension: 1)
-let critic_v: CriticVNetwork = CriticVNetwork(state_size: 3, hiddenLayerSizes:[300, 200], outDimension: 1)
-let critic_v_target: CriticVNetwork = CriticVNetwork(state_size: 3, hiddenLayerSizes:[300, 200], outDimension: 1)
+let actor_net: GaussianActorNetwork = GaussianActorNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [400, 300], maximum_action:max_action)
+let critic_q1: CriticQNetwork = CriticQNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [400, 300], outDimension: 1)
+let critic_q2: CriticQNetwork = CriticQNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [400, 300], outDimension: 1)
+let critic_v: CriticVNetwork = CriticVNetwork(state_size: 3, hiddenLayerSizes:[400, 300], outDimension: 1)
+let critic_v_target: CriticVNetwork = CriticVNetwork(state_size: 3, hiddenLayerSizes:[400, 300], outDimension: 1)
 
 let actor_critic: SoftActorCritic = SoftActorCritic(actor: actor_net,
                                                     critic_1: critic_q1,
@@ -722,7 +722,7 @@ let(totalRewards, movingAvgReward, actor_losses, critic_1_losses, critic_2_losse
         batchSize: 32,
         stepsPerEpisode: 200,
         tau: 0.005,
-        update_every: 10,
+        update_every: 50,
         epsilonStart: 0.99,
         epsilonDecay: 150)
 

@@ -583,7 +583,7 @@ plt.ylabel("Smoothed Episode Reward")
 plt.savefig("results/rewards/pendulum-ddpgsmoothedreward-huberloss.png")
 plt.clf()
 let avgRewards_arr = np.array(movingAvgReward)
-np.save("results/rewards/pendulum-ddpgavgreward-1.npy", avgRewards_arr)
+np.save("results/rewards/pendulum-ddpgavgreward-huberloss.npy", avgRewards_arr)
 
 //save actor and critic losses
 plt.plot(critic_losses)
