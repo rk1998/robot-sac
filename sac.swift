@@ -254,8 +254,8 @@ struct GaussianActorNetwork: Layer {
     init(state_size: Int, action_size: Int, hiddenLayerSizes: [Int] = [400, 300], maximum_action: Tensor<Float>) {
         self.layer_1 = Dense<Float>(inputSize: state_size, outputSize: hiddenLayerSizes[0], activation: relu)
         self.layer_2 = Dense<Float>(inputSize: hiddenLayerSizes[0], outputSize: hiddenLayerSizes[1], activation: relu)
-        self.out_mean = Dense<Float>(inputSize: hiddenLayerSizes[1], outputSize: action_size, activation:tanh)
-        self.out_log_std = Dense<Float>(inputSize: hiddenLayerSizes[1], outputSize: action_size, activation: tanh)
+        self.out_mean = Dense<Float>(inputSize: hiddenLayerSizes[1], outputSize: action_size, activation:identity)
+        self.out_log_std = Dense<Float>(inputSize: hiddenLayerSizes[1], outputSize: action_size, activation:identity)
         self.dist = DiagonalGaussian(dimension: action_size)
         self.max_action = maximum_action
     }
@@ -272,11 +272,6 @@ struct GaussianActorNetwork: Layer {
         //During testing we can just take our mean as our raw actions
         let raw_actions_testing: Tensor<Float> = mu
         let raw_actions_training: Tensor<Float> = self.dist.sample(means: mu, log_stds: clipped_log_std)
-        // if testing {
-        //     raw_actions = mu
-        // } else {
-        //     raw_actions = self.dist.sample(means: mu, log_stds: clipped_log_std)
-        // }
         var logp_pis: Tensor<Float> = self.dist.log_likelihood(x: raw_actions_training, means: mu, log_stds: clipped_log_std)
         var logp_pis_test: Tensor<Float> = self.dist.log_likelihood(x: raw_actions_testing, means: mu, log_stds: clipped_log_std)
 
@@ -295,30 +290,38 @@ struct GaussianActorNetwork: Layer {
 
 }
 
-
 struct CriticQNetwork: Layer {
   typealias Input = [Tensor<Float>]
-  typealias Output = Tensor<Float>
+  typealias Output = [Tensor<Float>]
 
 
   public var layer_1, layer_2, layer_3 : Dense<Float>
+  public var layer_4, layer_5, layer_6 : Dense<Float>
 
   init(state_size: Int, action_size:Int, hiddenLayerSizes: [Int] = [400, 300], outDimension: Int) {
     self.layer_1 = Dense<Float>(inputSize: state_size + action_size, outputSize: hiddenLayerSizes[0], activation:relu)
     self.layer_2 = Dense<Float>(inputSize: hiddenLayerSizes[0], outputSize: hiddenLayerSizes[1], activation:relu)
     self.layer_3 = Dense<Float>(inputSize: hiddenLayerSizes[1], outputSize: outDimension, activation: identity)
 
+    self.layer_4 = Dense<Float>(inputSize: state_size + action_size, outputSize: hiddenLayerSizes[0], activation:relu)
+    self.layer_5 = Dense<Float>(inputSize: hiddenLayerSizes[0], outputSize: hiddenLayerSizes[1], activation:relu)
+    self.layer_6 = Dense<Float>(inputSize: hiddenLayerSizes[1], outputSize: outDimension, activation: identity)
+
   }
 
   @differentiable
-  func callAsFunction(_ input: Input) -> Output {
+  func callAsFunction(_ input: Input) -> Output{
     let state: Tensor<Float> = input[0]
     let action: Tensor<Float> = input[1]
     let state_and_action = Tensor(concatenating: [state, action], alongAxis: 1)
     let h1 = layer_1(state_and_action)
     let h2 = layer_2(h1)
-    let q_value = layer_3(h2)
-    return q_value
+    let q_value_1 = layer_3(h2)
+
+    let h3 = layer_4(state_and_action)
+    let h4 = layer_5(h3)
+    let q_value_2 = layer_6(h4)
+    return [q_value_1, q_value_2]
   }
 
 }
@@ -341,6 +344,24 @@ struct CriticVNetwork: Layer {
         let h2 = layer_2(h1)
         let output = layer_3(h2)
         return output
+    }
+
+}
+
+
+struct AlphaLayer : Layer {
+    typealias Output = Tensor<Float>
+    public var log_alpha : Tensor<Float>
+
+    init(log_alpha_init: Tensor<Float>) {
+      self.log_alpha = log_alpha_init
+    }
+
+    @differentiable
+    func callAsFunction(_ input: Tensor<Float>) -> Output {
+      //let alpha: Tensor<Float> = exp(self.log_alpha)
+      let log_result: Tensor<Float> = self.log_alpha*input
+      return log_result
     }
 
 }
@@ -392,14 +413,13 @@ class SoftActorCritic {
 
   public var critic_q1: CriticQNetwork
 
-  public var critic_q2: CriticQNetwork
-
   public var critic_v_network: CriticVNetwork
 
   public var target_critic_v_network: CriticVNetwork
-  //public var target_actor_network: ActorNetwork
 
   public var replayBuffer: ReplayBuffer
+
+  public var alpha_net : AlphaLayer
 
   //let action_noise: GaussianNoise<Float>
   let action_noise: OUNoise
@@ -410,49 +430,66 @@ class SoftActorCritic {
 
   let action_size: Int
 
-  let alpha: Float
+  public var alpha: Tensor<Float>
+
+  public var log_alpha: Tensor<Float>
+
+  let target_alpha: Tensor<Float>
 
   let actor_optimizer: Adam<GaussianActorNetwork>
 
   let critic_q1_optimizer: Adam<CriticQNetwork>
 
-  let critic_q2_optimizer: Adam<CriticQNetwork>
-
   let critic_v_optimizer: Adam<CriticVNetwork>
+
+  let alpha_optimizer: Adam<AlphaLayer>
+
+  let alpha_lr : Float
+
+ //let alpha_optimizer: Adam<Tensor<Float>>
 
   init (
     actor: GaussianActorNetwork,
     critic_1: CriticQNetwork,
-    critic_2: CriticQNetwork,
     critic_v: CriticVNetwork,
     critic_v_target: CriticVNetwork,
     stateSize: Int,
     actionSize: Int,
     critic_lr: Float = 0.0001,
     actor_lr: Float = 0.0001,
-    critic_v_lr: Float = 0.00009,
+    critic_v_lr: Float = 0.0001,
     alpha: Float = 0.2,
     gamma: Float = 0.95) {
       self.actor_network = actor
       self.critic_q1 = critic_1
-      self.critic_q2 = critic_2
       self.critic_v_network = critic_v
       self.target_critic_v_network = critic_v_target
       // self.target_actor_network = actor_target
+      //Init OUNoise (not really used)
       self.gamma = gamma
       let mu : Tensor<Float> = Tensor<Float>(0.0)
-      let sigma : Tensor<Float> = Tensor<Float>(0.3)
-      let x_init: Tensor<Float> = Tensor<Float>(0.00)
+      let sigma : Tensor<Float> = Tensor<Float>(0.15)
+      let x_init: Tensor<Float> = Tensor<Float>(-0.01)
       self.action_noise = OUNoise(mu: mu, sigma: sigma, x_init: x_init, theta: 0.15, dt: 0.05)
       //self.action_noise = GaussianNoise(standardDeviation: 0.20)
       self.state_size = stateSize
       self.action_size = actionSize
-      self.alpha = alpha
+
+      //init alpha
+      self.log_alpha = Tensor<Float>(log(Tensor<Float>(alpha)))
+     // self.alpha = exp(self.log_alpha)
+      self.alpha_net = AlphaLayer(log_alpha_init: self.log_alpha)
+      self.alpha = Tensor<Float>(alpha)
+      self.target_alpha = Tensor<Float>(Float(-self.action_size))
+      self.alpha_lr = critic_lr
+
+      //init optimizers
       self.actor_optimizer = Adam(for: self.actor_network, learningRate: actor_lr)
       self.critic_q1_optimizer = Adam(for: self.critic_q1, learningRate: critic_lr)
-      self.critic_q2_optimizer = Adam(for: self.critic_q2, learningRate: critic_lr)
       self.critic_v_optimizer = Adam(for: self.critic_v_network, learningRate: critic_v_lr)
-      self.replayBuffer = ReplayBuffer(capacity: 1100, combined: true)
+      self.alpha_optimizer = Adam(for: self.alpha_net, learningRate:actor_lr)
+
+      self.replayBuffer = ReplayBuffer(capacity: 1200, combined: true)
   }
 
   func remember(state: Tensor<Float>, action: Tensor<Float>, reward: Tensor<Float>, next_state: Tensor<Float>, dones: Tensor<Bool>) {
@@ -466,10 +503,10 @@ class SoftActorCritic {
     let actions_training: Tensor<Float> = net_output[0]
     let actions_testing: Tensor<Float> = net_output[1]
     if training {
-      //let noise = self.action_noise.getNoise()
-      let noisy_action = actions_training
-      //let noisy_action = self.action_noise(net_action)
+      let noise = self.action_noise.getNoise()
+      let noisy_action = actions_training + noise
       let action = noisy_action.clipped(min:-2.0, max:2.0)
+      //let action = actions_training
       return action[0]
     } else {
       return actions_testing[0]
@@ -477,55 +514,67 @@ class SoftActorCritic {
 
   }
 
-  func train_actor_critic(batchSize: Int, iterationNum: Int) -> (Float, Float, Float, Float) {
+  func train_actor_critic(batchSize: Int, iterationNum: Int) -> (Float, Float, Float) {
 
     let (states, actions, rewards, nextstates, dones) = self.replayBuffer.sample(batchSize: batchSize)
+
+    // let value_next_target: Tensor<Float> = self.target_critic_v_network(nextstates).flattened()
+    // let target_q_values: Tensor<Float> =  rewards + self.gamma * (1 - Tensor<Float>(dones)) * value_next_target
     //train critic_q1
     let(critic_q1_loss, critic_q1_gradients) = valueWithGradient(at: self.critic_q1) { critic_q1 -> Tensor<Float> in
       //get target q values from target critic network
       let value_next_target: Tensor<Float> = self.target_critic_v_network(nextstates).flattened()
       let target_q_values: Tensor<Float> =  rewards + self.gamma * (1 - Tensor<Float>(dones)) * value_next_target
+
       //get predicted q values from critic network
       let target_q_values_no_deriv : Tensor<Float> = withoutDerivative(at: target_q_values)
-      let predicted_q_values: Tensor<Float> = critic_q1([states, actions]).flattened()
-
-      let td_error: Tensor<Float> = target_q_values_no_deriv - predicted_q_values
-      let td_loss: Tensor<Float> = 0.5*(pow(td_error, 2)).mean()
+      let output = critic_q1([states, actions])
+      let predicted_q_values_1 : Tensor<Float> = output[0].flattened()
+      let predicted_q_values_2 : Tensor<Float> = output[1].flattened()
+      let td_error_1: Tensor<Float> = target_q_values_no_deriv - predicted_q_values_1
+      let td_error_2: Tensor<Float> = target_q_values_no_deriv - predicted_q_values_2
+      let td_loss_1: Tensor<Float> = 0.5*(pow(td_error_1, 2)).mean()
+      let td_loss_2: Tensor<Float> = 0.5*(pow(td_error_2, 2)).mean()
+      let td_loss = td_loss_1 + td_loss_2
       return td_loss
       //return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 5.0).mean()
     }
     self.critic_q1_optimizer.update(&self.critic_q1, along: critic_q1_gradients)
 
     //train critic_q2
-    let(critic_q2_loss, critic_q2_gradients) = valueWithGradient(at: self.critic_q2) { critic_q2 -> Tensor<Float> in
-      //get target q values from target critic network
-      let value_next_target: Tensor<Float> = self.target_critic_v_network(nextstates).flattened()
-      let target_q_values: Tensor<Float> =  rewards + self.gamma * (1 - Tensor<Float>(dones)) * value_next_target
-      //get predicted q values from critic network
-      let target_q_values_no_deriv : Tensor<Float> = withoutDerivative(at: target_q_values)
-      let predicted_q_values: Tensor<Float> = critic_q2([states, actions]).flattened()
-      let td_error: Tensor<Float> = target_q_values_no_deriv - predicted_q_values
-      let td_loss: Tensor<Float> = 0.5*(pow(td_error, 2)).mean()
-      return td_loss
-      //return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 5.0).mean()
-    }
-    self.critic_q2_optimizer.update(&self.critic_q2, along: critic_q2_gradients)
+    // let(critic_q2_loss, critic_q2_gradients) = valueWithGradient(at: self.critic_q2) { critic_q2 -> Tensor<Float> in
+    //   //get target q values from target critic network
+    //   // let value_next_target: Tensor<Float> = self.target_critic_v_network(nextstates).flattened()
+    //   // let target_q_values: Tensor<Float> =  rewards + self.gamma * (1 - Tensor<Float>(dones)) * value_next_target
 
+    //   //get predicted q values from critic network
+    //   let target_q_values_no_deriv : Tensor<Float> = withoutDerivative(at: target_q_values)
+    //   let predicted_q_values: Tensor<Float> = critic_q2([states, actions]).flattened()
+    //   let td_error: Tensor<Float> = target_q_values_no_deriv - predicted_q_values
+    //   let td_loss: Tensor<Float> = 0.5*(pow(td_error, 2)).mean()
+    //   return td_loss
+    //   //return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 5.0).mean()
+    // }
+    // self.critic_q2_optimizer.update(&self.critic_q2, along: critic_q2_gradients)
 
     //train value network
     let(critic_v_loss, critic_v_gradients) = valueWithGradient(at: self.critic_v_network) { critic_v_network -> Tensor<Float> in
-        let current_v: Tensor<Float> = self.critic_v_network(states)
+        let current_v: Tensor<Float> = self.critic_v_network(states).flattened()
         let actor_output = self.actor_network(states)
         let sample_actions: Tensor<Float> = actor_output[0]
         let logp_pi: Tensor<Float> = actor_output[2]
 
-        let current_q1: Tensor<Float> = self.critic_q1([states, sample_actions])
-        let current_q2: Tensor<Float> = self.critic_q2([states, sample_actions])
+        let critic_out = self.critic_q1([states, sample_actions])
+        let current_q1: Tensor<Float> = critic_out[0].flattened()
+        let current_q2: Tensor<Float> = critic_out[1].flattened()
+
+        // let current_q1: Tensor<Float> = self.critic_q1([states, sample_actions])
+        // let current_q2: Tensor<Float> = self.critic_q2([states, sample_actions])
         let minimum_q: Tensor<Float> = min(current_q1, current_q2)
 
-        let target_values: Tensor<Float> = withoutDerivative(at: minimum_q - self.alpha * logp_pi)
-        //let target_values_no_deriv: Tensor<Float> = withoutDerivative(at: target_values)
-        let td_error: Tensor<Float> = current_v - target_values
+        //let target_values: Tensor<Float> = minimum_q - self.alpha*logp_pi
+        let target_values_no_deriv: Tensor<Float> = withoutDerivative(at: minimum_q - self.alpha*logp_pi)
+        let td_error: Tensor<Float> = target_values_no_deriv - current_v
         let td_loss: Tensor<Float> = 0.5*(pow(td_error, 2)).mean()
         return td_loss
         //return huberLoss(predicted: current_v, expected: target_values_no_deriv, delta: 5.5).mean()
@@ -541,16 +590,34 @@ class SoftActorCritic {
         let sample_actions: Tensor<Float> = actor_output[0]
         let logp_pi: Tensor<Float> = actor_output[2]
 
-        let current_q1: Tensor<Float> = self.critic_q1([states, sample_actions])
-        let current_q2: Tensor<Float> = self.critic_q2([states, sample_actions])
+        // let current_q1: Tensor<Float> = self.critic_q1([states, sample_actions])
+        // let current_q2: Tensor<Float> = self.critic_q2([states, sample_actions])
+        let critic_out = self.critic_q1([states, sample_actions])
+        let current_q1: Tensor<Float> = critic_out[0].flattened()
+        let current_q2: Tensor<Float> = critic_out[1].flattened()
         let minimum_q: Tensor<Float> = min(current_q1, current_q2)
 
-        let error: Tensor<Float> = minimum_q - self.alpha * logp_pi
-        let loss: Tensor<Float> = -1.0 * error.mean()
+        let error: Tensor<Float> = self.alpha*logp_pi - minimum_q
+        let loss: Tensor<Float> = error.mean()
         return loss
     }
     self.actor_optimizer.update(&self.actor_network, along: actor_gradients)
-    return (actor_loss.scalarized(), critic_q1_loss.scalarized(), critic_q2_loss.scalarized(), critic_v_loss.scalarized())
+
+    //train_alpha
+    let(_, alpha_gradients) = valueWithGradient(at: self.alpha_net) { alpha_net -> Tensor<Float> in
+      let actor_output = self.actor_network(states)
+      let logp_pi : Tensor<Float> = actor_output[2]
+      let target_value = withoutDerivative(at: logp_pi + self.target_alpha)
+      let output : Tensor<Float> = self.alpha_net(target_value)
+      let loss = -1.0 * (output).mean()
+      return loss
+
+    }
+    self.alpha_optimizer.update(&self.alpha_net, along:alpha_gradients)
+    // self.log_alpha.move(along: -1.0*self.alpha_lr*alpha_gradients)
+    self.alpha = exp(self.alpha_net.log_alpha)
+
+    return (actor_loss.scalarized(), critic_q1_loss.scalarized(), critic_v_loss.scalarized())
   }
 
   func updateValueTargetNetwork(tau: Float) {
@@ -576,22 +643,23 @@ class SoftActorCritic {
  }
 
 
- //training algorithm for SoftActorCritic
+
+//training algorithm for SoftActorCritic
 func sac_train(actor_critic: SoftActorCritic, env: TensorFlowEnvironmentWrapper,
           maxEpisodes: Int = 1000, batchSize: Int = 32,
           stepsPerEpisode: Int = 300, tau: Float = 0.001,
           update_every: Int = 1, epsilonStart: Float = 0.99,
-          epsilonEnd:Float = 0.01, epsilonDecay: Float = 1000) ->([Float], [Float], [Float], [Float], [Float], [Float]) {
+          epsilonEnd:Float = 0.01, epsilonDecay: Float = 1000) ->([Float], [Float], [Float], [Float], [Float]) {
     var totalRewards: [Float] = []
     var movingAverageReward: [Float] = []
     var actor_losses: [Float] = []
     var critic_1_losses: [Float] = []
-    var critic_2_losses: [Float] = []
+    //var critic_2_losses: [Float] = []
     var value_losses: [Float] = []
     var bestReward: Float = -99999999.0
     //var sample_random_action: Bool = true
     var training: Bool = false
-    let sampling_episodes: Int = 100
+    let sampling_episodes: Int = 10
     actor_critic.updateValueTargetNetwork(tau: 1.0)
     for i in 0..<maxEpisodes {
       print("\nEpisode: \(i)")
@@ -606,7 +674,7 @@ func sac_train(actor_critic: SoftActorCritic, env: TensorFlowEnvironmentWrapper,
       var totalReward: Float = 0
       var totalActorLoss: Float = 0
       var totalCriticQ1Loss: Float = 0
-      var totalCriticQ2Loss: Float = 0
+      //var totalCriticQ2Loss: Float = 0
       var totalValueLoss: Float = 0
       var totalTrainingSteps: Int = 0
       for j in 0..<stepsPerEpisode {
@@ -626,10 +694,10 @@ func sac_train(actor_critic: SoftActorCritic, env: TensorFlowEnvironmentWrapper,
         if actor_critic.replayBuffer.count > batchSize && training{
           totalTrainingSteps += 1
           //Train Actor and Critic Networks
-          let(actor_loss, critic_q1_loss, critic_q2_loss, value_loss) = actor_critic.train_actor_critic(batchSize: batchSize, iterationNum: j)
+          let(actor_loss, critic_q1_loss, value_loss) = actor_critic.train_actor_critic(batchSize: batchSize, iterationNum: j)
           totalActorLoss += actor_loss
           totalCriticQ1Loss += critic_q1_loss
-          totalCriticQ2Loss += critic_q2_loss
+          //totalCriticQ2Loss += critic_q2_loss
           totalValueLoss += value_loss
         }
 
@@ -639,10 +707,20 @@ func sac_train(actor_critic: SoftActorCritic, env: TensorFlowEnvironmentWrapper,
 
         state = nextState
       }
-      if totalReward > bestReward {
-        bestReward = totalReward
-      }
       totalRewards.append(totalReward)
+
+      if totalRewards.count < 10 {
+        var sum: Float = 0.0
+        for k in 0..<totalRewards.count{
+          let reward_k = totalRewards[k]
+          sum += reward_k
+        }
+        let avgTotal = sum/Float(totalRewards.count)
+        if avgTotal > bestReward {
+          bestReward = avgTotal
+        }
+      }
+
       if totalRewards.count >= 10 {
         var sum: Float = 0.0
         for k in totalRewards.count - 10..<totalRewards.count {
@@ -651,29 +729,30 @@ func sac_train(actor_critic: SoftActorCritic, env: TensorFlowEnvironmentWrapper,
         }
         let avgTotal: Float = sum/10
         movingAverageReward.append(avgTotal)
+        if avgTotal > bestReward {
+          bestReward = avgTotal
+        }
       }
       if training {
-        // if i % update_every == 0 {
-        //   actor_critic.updateCriticTargetNetwork(tau: tau)
-        //   actor_critic.updateActorTargetNetwork(tau: tau)
-        // }
         let avgActorLoss: Float = totalActorLoss/Float(totalTrainingSteps)
         let avgCriticQ1Loss: Float = totalCriticQ1Loss/Float(totalTrainingSteps)
-        let avgCriticQ2Loss: Float = totalCriticQ2Loss/Float(totalTrainingSteps)
+        //let avgCriticQ2Loss: Float = totalCriticQ2Loss/Float(totalTrainingSteps)
         let avgValueLoss: Float = totalValueLoss/Float(totalTrainingSteps)
         actor_losses.append(avgActorLoss)
         critic_1_losses.append(avgCriticQ1Loss)
-        critic_2_losses.append(avgCriticQ2Loss)
+        //critic_2_losses.append(avgCriticQ2Loss)
         value_losses.append(avgValueLoss)
-        print(String(format: "Episode: %4d | Total Reward %.03f | Best Reward: %.03f | Avg. Actor Loss: %.03f | Avg. Critic 1 Loss: %.03f | Avg. Critic 2 Loss: %.03f | Avg. Value Loss: %.03f",
-        i, totalReward, bestReward, avgActorLoss, avgCriticQ1Loss, avgCriticQ2Loss, avgValueLoss))
+        print(String(format: "Episode: %4d | Total Reward %.03f | Best Avg. Reward: %.03f | Avg. Actor Loss: %.03f | Avg. Critic 1 Loss: %.03f | Avg. Value Loss: %.03f",
+        i, totalReward, bestReward, avgActorLoss, avgCriticQ1Loss, avgValueLoss))
+        print(actor_critic.alpha)
+        print(actor_critic.alpha_net.log_alpha)
       } else {
-        print(String(format: "Episode: %4d | Total Reward %.03f | Best Reward: %.03f",
+        print(String(format: "Episode: %4d | Total Reward %.03f | Best Avg. Reward: %.03f",
         i, totalReward, bestReward))
       }
     }
     print("Finished Training")
-    return (totalRewards, movingAverageReward, actor_losses, critic_1_losses, critic_2_losses, value_losses)
+    return (totalRewards, movingAverageReward, actor_losses, critic_1_losses, value_losses)
 }
 
 
@@ -703,22 +782,21 @@ func evaluate_agent(agent: SoftActorCritic, env: TensorFlowEnvironmentWrapper, n
 let env = TensorFlowEnvironmentWrapper(gym.make("Pendulum-v0"))
 env.set_environment_seed(seed: 1001)
 let max_action: Tensor<Float> = Tensor<Float>(2.0)
-let actor_net: GaussianActorNetwork = GaussianActorNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [400, 300], maximum_action:max_action)
-let critic_q1: CriticQNetwork = CriticQNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [400, 300], outDimension: 1)
-let critic_q2: CriticQNetwork = CriticQNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [400, 300], outDimension: 1)
-let critic_v: CriticVNetwork = CriticVNetwork(state_size: 3, hiddenLayerSizes:[400, 300], outDimension: 1)
-let critic_v_target: CriticVNetwork = CriticVNetwork(state_size: 3, hiddenLayerSizes:[400, 300], outDimension: 1)
+let actor_net: GaussianActorNetwork = GaussianActorNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [256, 256], maximum_action:max_action)
+let critic_q1: CriticQNetwork = CriticQNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [256, 256], outDimension: 1)
+//let critic_q2: CriticQNetwork = CriticQNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [300, 200], outDimension: 1)
+let critic_v: CriticVNetwork = CriticVNetwork(state_size: 3, hiddenLayerSizes:[256, 256], outDimension: 1)
+let critic_v_target: CriticVNetwork = CriticVNetwork(state_size: 3, hiddenLayerSizes:[256, 256], outDimension: 1)
 
 let actor_critic: SoftActorCritic = SoftActorCritic(actor: actor_net,
                                                     critic_1: critic_q1,
-                                                    critic_2: critic_q2,
                                                     critic_v: critic_v,
                                                     critic_v_target: critic_v_target,
-                                                    stateSize: 3, actionSize: 1, alpha: 0.25, gamma: 0.99)
-let(totalRewards, movingAvgReward, actor_losses, critic_1_losses, critic_2_losses, value_losses)
+                                                    stateSize: 3, actionSize: 1, alpha: 0.20, gamma: 0.99)
+let(totalRewards, movingAvgReward, actor_losses, critic_1_losses, value_losses)
   = sac_train(actor_critic: actor_critic,
         env: env,
-        maxEpisodes: 1500,
+        maxEpisodes: 1200,
         batchSize: 32,
         stepsPerEpisode: 200,
         tau: 0.005,
@@ -726,7 +804,6 @@ let(totalRewards, movingAvgReward, actor_losses, critic_1_losses, critic_2_losse
         epsilonStart: 0.99,
         epsilonDecay: 150)
 
-evaluate_agent(agent: actor_critic, env: env, num_steps: 300)
 
 //plot results
 plt.plot(totalRewards)
@@ -775,6 +852,8 @@ plt.xlabel("Episode")
 plt.ylabel("Loss")
 plt.savefig("results/losses/sac-value-losses-2.png")
 plt.clf()
+
+evaluate_agent(agent: actor_critic, env: env, num_steps: 300)
 
 
 
