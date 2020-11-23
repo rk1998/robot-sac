@@ -209,7 +209,7 @@ struct DiagonalGaussian {
     }
 
     func sample(means: Tensor<Float>, log_stds: Tensor<Float>) -> Tensor<Float> {
-        let rand_normal: Tensor<Float> = Tensor<Float>(randomNormal:means.shape, mean:Tensor<Float>(zeros: means.shape), standardDeviation:Tensor<Float>(zeros: log_stds.shape))
+        let rand_normal: Tensor<Float> = Tensor<Float>(randomNormal:means.shape, mean: Tensor<Float>(0.0), standardDeviation: Tensor<Float>(0.0))
         let result = means + rand_normal * exp(log_stds)
         return result
     }
@@ -245,23 +245,42 @@ struct GaussianActorNetwork: Layer {
     public var out_mean: Dense<Float>
     public var out_log_std: Dense<Float>
 
-    @noDerivative
-    public var dist: DiagonalGaussian
+    public var dim: Tensor<Float>
+
+    // @noDerivative
+    // public var dist: DiagonalGaussian
 
     @noDerivative
     public var max_action: Tensor<Float>
 
     init(state_size: Int, action_size: Int, hiddenLayerSizes: [Int] = [400, 300], maximum_action: Tensor<Float>) {
+        self.dim = Tensor<Float>(Float(action_size))
         self.layer_1 = Dense<Float>(inputSize: state_size, outputSize: hiddenLayerSizes[0], activation: relu)
         self.layer_2 = Dense<Float>(inputSize: hiddenLayerSizes[0], outputSize: hiddenLayerSizes[1], activation: relu)
         self.out_mean = Dense<Float>(inputSize: hiddenLayerSizes[1], outputSize: action_size, activation:identity)
         self.out_log_std = Dense<Float>(inputSize: hiddenLayerSizes[1], outputSize: action_size, activation:identity)
-        self.dist = DiagonalGaussian(dimension: action_size)
+        //self.dist = DiagonalGaussian(dimension: action_size)
         self.max_action = maximum_action
     }
 
+    @differentiable
+    func sample(means: Tensor<Float>, log_stds: Tensor<Float>) -> Tensor<Float> {
 
-    @differentiable(wrt: input)
+        let rand_normal: Tensor<Float> = Tensor<Float>(randomNormal:means.shape, mean: Tensor<Float>(0.0), standardDeviation: Tensor<Float>(1.0))
+        let result = means + rand_normal * exp(log_stds)
+        return result
+    }
+
+    @differentiable
+    func log_likelihood(x: Tensor<Float>, means: Tensor<Float>, log_stds: Tensor<Float>) -> Tensor<Float> {
+        let z_s: Tensor<Float> = (x - means) / exp(log_stds)
+        var result: Tensor<Float> = -log_stds.sum(alongAxes: -1) - (0.5*pow(z_s, 2)).sum(alongAxes: -1)
+        let pi: Float = 3.1415926354
+        result = result - 0.5 * self.dim * log(2 * Tensor<Float>(pi))
+        return result
+    }
+
+    @differentiable
     func callAsFunction(_ input: Input) -> Output {
         let h1 = layer_1(input)
         let h2 = layer_2(h1)
@@ -271,17 +290,22 @@ struct GaussianActorNetwork: Layer {
         //During training we sample from a Diagonal Gaussian.
         //During testing we can just take our mean as our raw actions
         let raw_actions_testing: Tensor<Float> = mu
-        let raw_actions_training: Tensor<Float> = self.dist.sample(means: mu, log_stds: clipped_log_std)
-        var logp_pis: Tensor<Float> = self.dist.log_likelihood(x: raw_actions_training, means: mu, log_stds: clipped_log_std)
-        var logp_pis_test: Tensor<Float> = self.dist.log_likelihood(x: raw_actions_testing, means: mu, log_stds: clipped_log_std)
+        let raw_actions_training: Tensor<Float> = self.sample(means:mu, log_stds: clipped_log_std)
+
+        //let raw_actions_training: Tensor<Float> = self.dist.sample(means: mu, log_stds: clipped_log_std)
+        //var logp_pis: Tensor<Float> = self.dist.log_likelihood(x: raw_actions_training, means: mu, log_stds: clipped_log_std)
+        //var logp_pis_test: Tensor<Float> = self.dist.log_likelihood(x: raw_actions_testing, means: mu, log_stds: clipped_log_std)
+
+        var logp_pis: Tensor<Float> = self.log_likelihood(x: raw_actions_training, means: mu, log_stds: clipped_log_std)
+        var logp_pis_test: Tensor<Float> = self.log_likelihood(x: raw_actions_testing, means: mu, log_stds: clipped_log_std)
 
         //apply a squashing function to the raw_actions
         let actions_training: Tensor<Float> = tanh(raw_actions_training)
         let actions_testing: Tensor<Float> = tanh(raw_actions_testing)
 
         //squash correction
-        let diff_train = (log(1.0 - pow(raw_actions_training, 2) + Tensor<Float>(eps))).sum(alongAxes: 1)
-        let diff_test = (log(1.0 - pow(raw_actions_testing, 2) + Tensor<Float>(eps))).sum(alongAxes: 1)
+        let diff_train = (log(1.0 - pow(actions_training, 2) + Tensor<Float>(eps))).sum(alongAxes: 1)
+        let diff_test = (log(1.0 - pow(actions_testing, 2) + Tensor<Float>(eps))).sum(alongAxes: 1)
         logp_pis = logp_pis - diff_train
         logp_pis_test = logp_pis -  diff_test
         return [actions_training * self.max_action, actions_testing * self.max_action, logp_pis, logp_pis_test, mu, log_std]
@@ -489,7 +513,7 @@ class SoftActorCritic {
       self.critic_v_optimizer = Adam(for: self.critic_v_network, learningRate: critic_v_lr)
       self.alpha_optimizer = Adam(for: self.alpha_net, learningRate:actor_lr)
 
-      self.replayBuffer = ReplayBuffer(capacity: 1200, combined: true)
+      self.replayBuffer = ReplayBuffer(capacity: 1100, combined: true)
   }
 
   func remember(state: Tensor<Float>, action: Tensor<Float>, reward: Tensor<Float>, next_state: Tensor<Float>, dones: Tensor<Bool>) {
@@ -503,10 +527,10 @@ class SoftActorCritic {
     let actions_training: Tensor<Float> = net_output[0]
     let actions_testing: Tensor<Float> = net_output[1]
     if training {
-      let noise = self.action_noise.getNoise()
-      let noisy_action = actions_training + noise
-      let action = noisy_action.clipped(min:-2.0, max:2.0)
-      //let action = actions_training
+      // let noise = self.action_noise.getNoise()
+      // let noisy_action = actions_training + noise
+      // let action = noisy_action.clipped(min:-2.0, max:2.0)
+      let action = actions_training
       return action[0]
     } else {
       return actions_testing[0]
