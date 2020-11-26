@@ -1,7 +1,8 @@
-///Implementation of the DDPG (Deep Deterministic Policy Gradient) Algorithm
+///Implementation of the DDPG (Deep Deterministic Policy Gradient) Algorithm with
+///Hindsight Experience Replay
 /// This implementation uses swift for Tensorflow and borrows ideas from
 /// the swift-models repository: https://github.com/tensorflow/swift-models/
-/// Original Paper:  http://arxiv.org/pdf/1509.02971v2.pdf
+/// Original Paper:  https://arxiv.org/pdf/1707.01495.pdf
 /// Swift for TensorFlow: https://github.com/tensorflow/swift
 /// Author: Rohith Krishnan
 import Foundation
@@ -57,6 +58,159 @@ extension Tensor where Scalar: TensorFlowFloatingPoint {
 }
 
 
+//Taken from the DQN example in the tensorflow swift-models repo
+//: https://github.com/tensorflow/swift-models/blob/master/Gym/DQN/main.swift
+class MultiGoalEnvironmentWrapper {
+  let originalEnv: PythonObject
+  public let state_size: Int
+  public let action_size: Int
+  public let max_action_val: Float
+
+  init(_ env: PythonObject) {
+    self.originalEnv = env
+    self.state_size = Int(env.observation_space.shape[0])!
+    self.action_size = Int(env.action_space.shape[0])!
+    self.max_action_val = Int(env.action_space.high[0])!
+  }
+
+  func reset() -> (state: Tensor<Float>, achieved_goal: Tensor<Float>, desired_goal: Tensor<Float> {
+    let state = self.originalEnv.reset()
+    let observation = state["observation"]
+    let achieved_goal = state["achieved_goal"]
+    let desired_goal = state["desired_goal"]
+    return (Tensor<Float>(numpy: np.array(observation, dtype: np.float32))!, Tensor<Float>(numpy: np.array(achieved_goal, dtype: np.float32))!, Tensor<Float>(numpy: np.array(desired_goal, dtype: np.float32))!
+  }
+
+  func step(_ action: Tensor<Float>) -> (
+    state: Tensor<Float>, achieved_goal: Tensor<Float>, desired_goal: Tensor<Float>, reward: Tensor<Float>, isDone: Tensor<Bool>, info: PythonObject
+  ) {
+    let (state, reward, isDone, info) = originalEnv.step(action.makeNumpyArray()).tuple4
+    let observation = state["observation"]
+    let achieved_goal = state["achieved_goal"]
+    let desired_goal = state["desired_goal"]
+    let tfState = Tensor<Float>(numpy: np.array(observation, dtype: np.float32))!
+    let tfgoal = Tensor<Float>(numpy: np.array(achieved_goal, dtype: np.float32))!
+    let tfgoal_desired = Tensor<Float>(numpy: np.array(desired_goal, dtype: np.float32))!
+    let tfReward = Tensor<Float>(numpy: np.array(reward, dtype: np.float32))!
+    let tfIsDone = Tensor<Bool>(numpy: np.array(isDone, dtype: np.bool))!
+    return (tfState, tfgoal, tfgoal_desired, tfReward, tfIsDone, info)
+  }
+
+  func set_environment_seed(seed: Int) {
+    self.originalEnv.seed(seed)
+  }
+
+  func compute_reward(achieved_goal: Tensor<Float>, goal: Tensor<Float>) -> Tensor<Float> {
+    let achieved_goal_np = achieved_goal.makeNumpyArray()
+    let goal_np = goal.makeNumpyArray()
+    let reward = self.originalEnv.compute_reward(achieved_goal, goal, "sparse")
+    let tfReward = Tensor<Float>(numpy: np.array(reward, dtype: np.float32))!
+    return tfReward
+  }
+
+  func action_sample() -> Tensor<Float> {
+    let action = originalEnv.action_space.sample()
+    let tfAction = Tensor<Float>(numpy: np.array(action, dtype: np.float32))!
+    return tfAction
+  }
+}
+
+
+class HERSampler {
+
+  let replay_length: Int
+  let future_p: Float
+
+  init(replay_length: Int) {
+    self.replay_length = replay_length
+    self.future_p = 1.0 - (1.0 /Float(1 + self.replay_length))
+  }
+
+  func sample_transitions(episode_batch: [Tensor<Float>] batch_size:Int) -> (
+    stateBatch: Tensor<Float>,
+    actionBatch: Tensor<Float>,
+    rewardBatch: Tensor<Float>,
+    nextStateBatch: Tensor<Float>,
+    isDoneBatch: Tensor<Bool>
+    ) {
+  }
+
+
+}
+
+
+
+class HERReplayBuffer {
+  let buffer_size: Int
+
+  let max_timesteps: Int
+
+  let max_size: Int
+
+  let sample_size: Int
+
+  var current_size: Int
+
+  var num_transitions: Int
+
+  let sampler : HERSampler
+
+
+
+  @noDerivative var buffers : [String : PythonObject]
+
+  init(max_timesteps: Int, max_buffer_size: Int, state_size: Int, goal_size: Int, action_size: Int) {
+    self.max_timesteps = max_timesteps
+    self.max_size = max_buffer_size
+    self.current_size = 0
+    self.num_transitions = 0
+    self.sample_size = Int(max_buffer_size/max_timesteps)
+    self.sampler = HERSampler(replay_length: 4)
+    self.buffers = ["state" : [Tensor<Float>],
+                    "achieved_goal" : [Tensor<Float>],
+                    "desired_goal" : [Tensor<Float>],
+                    "actions" : [Tensor<Float>]]
+  }
+
+  func remember(episode_batch: [[Tensor<Float>]]) {
+    let states = episode_batch[0]
+    let achieved_goals = episode_batch[1]
+    let desired_goals = episode_batch[2]
+    let actions = episode_batch[3]
+    let count : Int = self.buffer["state"].count
+    if count >= self.max_size {
+      // Erase oldest SARS if the replay buffer is full
+      self.buffer["state"].removeFirst()
+      self.buffer["achieved_goal"].removeFirst()
+      self.buffer["desired_goal"].removeFirst()
+      self.buffer["actions"].removeFirst()
+    }
+    for i in 0..<episode_batch[0].count {
+      self.buffer["state"].append(states[i])
+      self.buffer["achieved_goal"].append(achieved_goals[i])
+      self.buffer["desired_goal"].append(desired_goals[i])
+      self.buffer["actions"].append(actions[i])
+    }
+
+
+  }
+
+  func sample_batch(batch_size: Int) -> (
+    stateBatch: Tensor<Float>,
+    goalBatch: Tensor<Float>,
+    actionBatch: Tensor<Float>,
+    rewardBatch: Tensor<Float>,
+    nextStateBatch: Tensor<Float>,
+    isDoneBatch: Tensor<Bool>
+  ) {
+
+  }
+
+
+
+}
+
+
 //Taken From https://github.com/tensorflow/swift-models/blob/master/Gym/DQN/ReplayBuffer.swift
 // Replay buffer to store the agent's experiences.
 ///
@@ -80,6 +234,10 @@ class ReplayBuffer {
 
   /// The states that the agent observed.
   @noDerivative var states: [Tensor<Float>] = []
+
+  @noDerivative var achieved_goals: [Tensor<Float>] = []
+
+  @noDerivative var desired_goals: [Tensor<Float>] = []
   /// The actions that the agent took.
   @noDerivative var actions: [Tensor<Float>] = []
   /// The rewards that the agent received from the environment after taking
@@ -100,6 +258,8 @@ class ReplayBuffer {
 
   func append(
     state: Tensor<Float>,
+    achieved_goal: Tensor<Float>,
+    desired_goal: Tensor<Float>,
     action: Tensor<Float>,
     reward: Tensor<Float>,
     nextState: Tensor<Float>,
@@ -108,12 +268,16 @@ class ReplayBuffer {
     if count >= capacity {
       // Erase oldest SARS if the replay buffer is full
       states.removeFirst()
+      achieved_goals.removeFirst()
+      desired_goals.removeFirst()
       actions.removeFirst()
       rewards.removeFirst()
       nextStates.removeFirst()
       isDones.removeFirst()
     }
     states.append(state)
+    achieved_goals.append(achieved_goal)
+    desired_goals.append(desired_goal)
     actions.append(action)
     rewards.append(reward)
     nextStates.append(nextState)
@@ -148,46 +312,6 @@ class ReplayBuffer {
 }
 
 
-//Taken from the DQN example in the tensorflow swift-models repo
-//: https://github.com/tensorflow/swift-models/blob/master/Gym/DQN/main.swift
-class TensorFlowEnvironmentWrapper {
-  let originalEnv: PythonObject
-  public let state_size: Int
-  public let action_size: Int
-  public let max_action_val: Float
-
-  init(_ env: PythonObject) {
-    self.originalEnv = env
-    self.state_size = Int(env.observation_space.shape[0])!
-    self.action_size = Int(env.action_space.shape[0])!
-    self.max_action_val = Float(env.action_space.high[0])!
-  }
-
-  func reset() -> Tensor<Float> {
-    let state = self.originalEnv.reset()
-    return Tensor<Float>(numpy: np.array(state, dtype: np.float32))!
-  }
-
-  func step(_ action: Tensor<Float>) -> (
-    state: Tensor<Float>, reward: Tensor<Float>, isDone: Tensor<Bool>, info: PythonObject
-  ) {
-    let (state, reward, isDone, info) = originalEnv.step([action.scalarized()]).tuple4
-    let tfState = Tensor<Float>(numpy: np.array(state, dtype: np.float32))!
-    let tfReward = Tensor<Float>(numpy: np.array(reward, dtype: np.float32))!
-    let tfIsDone = Tensor<Bool>(numpy: np.array(isDone, dtype: np.bool))!
-    return (tfState, tfReward, tfIsDone, info)
-  }
-
-  func set_environment_seed(seed: Int) {
-    self.originalEnv.seed(seed)
-  }
-
-  func action_sample() -> Tensor<Float> {
-    let action = originalEnv.action_space.sample()
-    let tfAction = Tensor<Float>(numpy: np.array(action, dtype: np.float32))!
-    return tfAction
-  }
-}
 
 struct CriticNetwork: Layer {
   typealias Input = [Tensor<Float>]
@@ -280,6 +404,8 @@ class OUNoise {
 
 
 }
+
+
 
 //Actor Critic Agent
 class ActorCritic {
@@ -423,192 +549,3 @@ class ActorCritic {
   }
 
  }
-
-
-
-//Deep Deterministic Policy Gradient Algorithm
-func ddpg(actor_critic: ActorCritic, env: TensorFlowEnvironmentWrapper,
-          maxEpisodes: Int = 1000, batchSize: Int = 32,
-          stepsPerEpisode: Int = 300, tau: Float = 0.001,
-          update_every: Int = 1, epsilonStart: Float = 0.99,
-          epsilonEnd:Float = 0.01, epsilonDecay: Float = 1000) ->([Float], [Float], [Float], [Float]) {
-    var totalRewards: [Float] = []
-    var movingAverageReward: [Float] = []
-    var actor_losses: [Float] = []
-    var critic_losses: [Float] = []
-    var bestReward: Float = -99999999.0
-    //var sample_random_action: Bool = true
-    var training: Bool = false
-    let sampling_episodes: Int = 100
-    actor_critic.updateCriticTargetNetwork(tau: 1.0)
-    actor_critic.updateActorTargetNetwork(tau: 1.0)
-    for i in 0..<maxEpisodes {
-      print("\nEpisode: \(i)")
-      var state = env.reset()
-      print(state)
-      //sample random actions for the first few episodes, then start using actor network w/ noise
-      if i == sampling_episodes {
-        print("Finished Warmup Episodes")
-        print("Starting Training")
-        training = true
-      }
-      var totalReward: Float = 0
-      var totalActorLoss: Float = 0
-      var totalCriticLoss: Float = 0
-      var totalTrainingSteps: Int = 0
-      var j : Int = 0
-      var done : Bool = false
-      while j < stepsPerEpisode && done != true {
-
-        var action: Tensor<Float>
-        //Sample random action or take action from actor depending on epsilon
-        if i < sampling_episodes {
-          action = env.action_sample()
-        } else {
-          action = actor_critic.get_action(state: state , env: env , training: true)
-        }
-        let(nextState, reward, isDone, _) = env.step(action)
-        done = isDone.scalarized()
-        totalReward += reward.scalarized()
-        //add (s, a, r, s') to actor_critic's replay buffer
-        actor_critic.remember(state:state, action:action, reward:reward, next_state:nextState, dones:isDone)
-
-        if actor_critic.replayBuffer.count > batchSize && training{
-          totalTrainingSteps += 1
-          //Train Actor and Critic Networks
-          let(actor_loss, critic_loss) = actor_critic.train_actor_critic(batchSize: batchSize, iterationNum: j)
-          totalActorLoss += actor_loss
-          totalCriticLoss += critic_loss
-        }
-
-        if j % update_every == 0 {
-          actor_critic.updateCriticTargetNetwork(tau: tau)
-          actor_critic.updateActorTargetNetwork(tau: tau)
-        }
-
-        state = nextState
-        j += 1
-      }
-      if totalReward > bestReward {
-        bestReward = totalReward
-      }
-      totalRewards.append(totalReward)
-      if totalRewards.count >= 10 {
-        var sum: Float = 0.0
-        for k in totalRewards.count - 10..<totalRewards.count {
-          let reward_k: Float  = totalRewards[k]
-          sum += reward_k
-        }
-        let avgTotal: Float = sum/10
-        movingAverageReward.append(avgTotal)
-      }
-      if training {
-        // if i % update_every == 0 {
-        //   actor_critic.updateCriticTargetNetwork(tau: tau)
-        //   actor_critic.updateActorTargetNetwork(tau: tau)
-        // }
-        let avgActorLoss: Float = totalActorLoss/Float(totalTrainingSteps)
-        let avgCriticLoss: Float = totalCriticLoss/Float(totalTrainingSteps)
-        actor_losses.append(avgActorLoss)
-        critic_losses.append(avgCriticLoss)
-        print(String(format: "Episode: %4d | Total Reward %.03f | Best Reward: %.03f | Avg. Actor Loss: %.03f | Avg. Critic Loss: %.03f",
-        i, totalReward, bestReward, avgActorLoss, avgCriticLoss))
-      } else {
-        print(String(format: "Episode: %4d | Total Reward %.03f | Best Reward: %.03f",
-        i, totalReward, bestReward))
-      }
-    }
-    print("Finished Training")
-    return (totalRewards, movingAverageReward, actor_losses, critic_losses)
-}
-
-
-
-func evaluate_agent(agent: ActorCritic, env: TensorFlowEnvironmentWrapper, num_steps: Int = 300, filename: String = "results/frames.npy") {
-  var frames: [PythonObject] = []
-  var state = env.reset()
-  var totalReward: Float = 0.0
-  for _ in 0..<num_steps {
-    let frame = env.originalEnv.render(mode: "rgb_array")
-    frames.append(frame)
-    let action = agent.get_action(state: state, env: env, training: false)
-    let (next_state, reward, _, _) = env.step(action)
-    let scalar_reward = reward.scalarized()
-    print("\nStep Reward: \(scalar_reward)")
-    totalReward += scalar_reward
-    state = next_state
-  }
-  env.originalEnv.close()
-  let frame_np_array = np.array(frames)
-  np.save(filename, frame_np_array)
-  print("\n Total Reward: \(totalReward)")
-}
-
-
-//train actor critic on pendulum environment
-let env = TensorFlowEnvironmentWrapper(gym.make("Pendulum-v0"))
-print(env.state_size)
-print(env.action_size)
-env.set_environment_seed(seed: 1001)
-let max_action: Tensor<Float> = Tensor<Float>(2.0)
-let actor_net: ActorNetwork = ActorNetwork(observationSize: 3, actionSize: 1, hiddenLayerSizes: [200, 100], maximum_action:max_action)
-let actor_target: ActorNetwork = ActorNetwork(observationSize: 3, actionSize: 1, hiddenLayerSizes: [200, 100], maximum_action:max_action)
-let critic_net: CriticNetwork = CriticNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [200, 100], outDimension: 1)
-let critic_target: CriticNetwork = CriticNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [200, 100], outDimension: 1)
-let actor_critic: ActorCritic = ActorCritic(actor: actor_net,
-                                            actor_target: actor_target,
-                                            critic: critic_net,
-                                            critic_target: critic_target,
-                                            stateSize: 3, actionSize: 1, gamma: 0.99)
-Context.local.learningPhase = .training
-let(totalRewards, movingAvgReward, actor_losses, critic_losses)
-  = ddpg(actor_critic: actor_critic,
-        env: env,
-        maxEpisodes: 1500,
-        batchSize: 32,
-        stepsPerEpisode: 200,
-        tau: 0.005,
-        update_every: 50,
-        epsilonStart: 0.99,
-        epsilonDecay: 150)
-
-evaluate_agent(agent: actor_critic, env: env, num_steps: 300, filename: "results/ddpg_pendulum_frames_huberloss.npy")
-
-//plot results
-plt.plot(totalRewards)
-plt.title("DDPG on Pendulum-v0 Rewards")
-plt.xlabel("Episode")
-plt.ylabel("Total Reward")
-plt.savefig("results/rewards/pendulum-ddpgreward-huberloss.png")
-plt.clf()
-let totalRewards_arr = np.array(totalRewards)
-np.save("results/rewards/pendulum-ddpgreward-huberloss.npy", totalRewards)
-// Save smoothed learning curve
-let runningMeanWindow: Int = 10
-let smoothedEpisodeReturns = np.convolve(
-  totalRewards, np.ones((runningMeanWindow)) / np.array(runningMeanWindow, dtype: np.int32),
-  mode: "same")
-plt.plot(movingAvgReward)
-plt.title("DDPG on Pendulum-v0 Avg Rewards")
-plt.xlabel("Episode")
-plt.ylabel("Smoothed Episode Reward")
-plt.savefig("results/rewards/pendulum-ddpgsmoothedreward-huberloss.png")
-plt.clf()
-let avgRewards_arr = np.array(movingAvgReward)
-np.save("results/rewards/pendulum-ddpgavgreward-huberloss.npy", avgRewards_arr)
-
-//save actor and critic losses
-plt.plot(critic_losses)
-plt.title("DDPG on Pendulum-v0 critic losses")
-plt.xlabel("Episode")
-plt.ylabel("TD Loss")
-plt.savefig("results/losses/ddpg-critic-losses-huberloss.png")
-plt.clf()
-
-
-plt.plot(actor_losses)
-plt.title("DDPG on Pendulum-v0 actor losses")
-plt.xlabel("Episode")
-plt.ylabel("Loss")
-plt.savefig("results/losses/ddpg-actor-losses-huberloss.png")
-plt.clf()

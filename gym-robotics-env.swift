@@ -9,6 +9,7 @@ let gym = Python.import("gym")
 func randomStep(numSteps: Int) -> Int {
     let env = gym.make("FetchPush-v1")
     env.reset()
+    print(env._max_episode_steps)
     for _ in 0..<numSteps {
       env.render()
       let action = env.action_space.sample()

@@ -1,9 +1,3 @@
-///Implementation of the DDPG (Deep Deterministic Policy Gradient) Algorithm
-/// This implementation uses swift for Tensorflow and borrows ideas from
-/// the swift-models repository: https://github.com/tensorflow/swift-models/
-/// Original Paper:  http://arxiv.org/pdf/1509.02971v2.pdf
-/// Swift for TensorFlow: https://github.com/tensorflow/swift
-/// Author: Rohith Krishnan
 import Foundation
 import PythonKit
 PythonLibrary.useVersion(3, 6)
@@ -171,11 +165,20 @@ class TensorFlowEnvironmentWrapper {
   func step(_ action: Tensor<Float>) -> (
     state: Tensor<Float>, reward: Tensor<Float>, isDone: Tensor<Bool>, info: PythonObject
   ) {
-    let (state, reward, isDone, info) = originalEnv.step([action.scalarized()]).tuple4
-    let tfState = Tensor<Float>(numpy: np.array(state, dtype: np.float32))!
-    let tfReward = Tensor<Float>(numpy: np.array(reward, dtype: np.float32))!
-    let tfIsDone = Tensor<Bool>(numpy: np.array(isDone, dtype: np.bool))!
-    return (tfState, tfReward, tfIsDone, info)
+    if action.shape[0] == 1 {
+        let (state, reward, isDone, info) = originalEnv.step([action.scalarized()]).tuple4
+        let tfState = Tensor<Float>(numpy: np.array(state, dtype: np.float32))!
+        let tfReward = Tensor<Float>(numpy: np.array(reward, dtype: np.float32))!
+        let tfIsDone = Tensor<Bool>(numpy: np.array(isDone, dtype: np.bool))!
+        return (tfState, tfReward, tfIsDone, info)
+    } else {
+        let action_np = action.makeNumpyArray()
+        let (state, reward, isDone, info) = originalEnv.step(action_np).tuple4
+        let tfState = Tensor<Float>(numpy: np.array(state, dtype: np.float32))!
+        let tfReward = Tensor<Float>(numpy: np.array(reward, dtype: np.float32))!
+        let tfIsDone = Tensor<Bool>(numpy: np.array(isDone, dtype: np.bool))!
+        return (tfState, tfReward, tfIsDone, info)
+    }
   }
 
   func set_environment_seed(seed: Int) {
@@ -315,7 +318,7 @@ class ActorCritic {
     critic_target: CriticNetwork,
     stateSize: Int,
     actionSize: Int,
-    critic_lr: Float = 0.00009,
+    critic_lr: Float = 0.0001,
     actor_lr: Float = 0.0001,
     gamma: Float = 0.95) {
       self.actor_network = actor
@@ -324,7 +327,7 @@ class ActorCritic {
       self.target_actor_network = actor_target
       self.gamma = gamma
       let mu : Tensor<Float> = Tensor<Float>(0.0)
-      let sigma : Tensor<Float> = Tensor<Float>(0.3)
+      let sigma : Tensor<Float> = Tensor<Float>(0.25)
       let x_init: Tensor<Float> = Tensor<Float>(0.00)
       self.action_noise = OUNoise(mu: mu, sigma: sigma, x_init: x_init, theta: 0.15, dt: 0.05)
       //self.action_noise = GaussianNoise(standardDeviation: 0.20)
@@ -332,7 +335,7 @@ class ActorCritic {
       self.action_size = actionSize
       self.actor_optimizer = Adam(for: self.actor_network, learningRate: actor_lr)
       self.critic_optimizer = Adam(for: self.critic_network, learningRate: critic_lr)
-      self.replayBuffer = ReplayBuffer(capacity: 1500, combined: true)
+      self.replayBuffer = ReplayBuffer(capacity: 3000, combined: true)
   }
 
   func remember(state: Tensor<Float>, action: Tensor<Float>, reward: Tensor<Float>, next_state: Tensor<Float>, dones: Tensor<Bool>) {
@@ -347,7 +350,7 @@ class ActorCritic {
       let noise = self.action_noise.getNoise()
       let noisy_action = net_action + noise
       //let noisy_action = self.action_noise(net_action)
-      let action = noisy_action.clipped(min:-2.0, max:2.0)
+      let action = noisy_action.clipped(min:-1.0, max:1.0)
       return action[0]
     } else {
       return net_action[0]
@@ -366,12 +369,7 @@ class ActorCritic {
       //get predicted q values from critic network
       let target_q_values_no_deriv : Tensor<Float> = withoutDerivative(at: target_q_values)
       let predicted_q_values: Tensor<Float> = critic_network([states, actions]).flattened()
-      //let td_error: Tensor<Float> = target_q_values_no_deriv - predicted_q_values
-      // let td_error: Tensor<Float> = squaredDifference(target_q_values_no_deriv, predicted_q_values)
-      // let td_loss: Tensor<Float> = td_error.mean()
-      //let td_loss: Tensor<Float> = 0.5*pow(td_error, 2).mean()
-      //return td_loss
-      return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 5.0).mean()
+      return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 3.0).mean()
     }
     self.critic_optimizer.update(&self.critic_network, along: critic_gradients)
     //train actor
@@ -439,13 +437,12 @@ func ddpg(actor_critic: ActorCritic, env: TensorFlowEnvironmentWrapper,
     var bestReward: Float = -99999999.0
     //var sample_random_action: Bool = true
     var training: Bool = false
-    let sampling_episodes: Int = 100
+    let sampling_episodes: Int = 15
     actor_critic.updateCriticTargetNetwork(tau: 1.0)
     actor_critic.updateActorTargetNetwork(tau: 1.0)
     for i in 0..<maxEpisodes {
       print("\nEpisode: \(i)")
       var state = env.reset()
-      print(state)
       //sample random actions for the first few episodes, then start using actor network w/ noise
       if i == sampling_episodes {
         print("Finished Warmup Episodes")
@@ -544,71 +541,71 @@ func evaluate_agent(agent: ActorCritic, env: TensorFlowEnvironmentWrapper, num_s
   print("\n Total Reward: \(totalReward)")
 }
 
-
-//train actor critic on pendulum environment
-let env = TensorFlowEnvironmentWrapper(gym.make("Pendulum-v0"))
+let env = TensorFlowEnvironmentWrapper(gym.make("BipedalWalker-v2"))
 print(env.state_size)
 print(env.action_size)
+print(env.originalEnv._max_episode_steps)
 env.set_environment_seed(seed: 1001)
-let max_action: Tensor<Float> = Tensor<Float>(2.0)
-let actor_net: ActorNetwork = ActorNetwork(observationSize: 3, actionSize: 1, hiddenLayerSizes: [200, 100], maximum_action:max_action)
-let actor_target: ActorNetwork = ActorNetwork(observationSize: 3, actionSize: 1, hiddenLayerSizes: [200, 100], maximum_action:max_action)
-let critic_net: CriticNetwork = CriticNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [200, 100], outDimension: 1)
-let critic_target: CriticNetwork = CriticNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [200, 100], outDimension: 1)
+let max_action: Tensor<Float> = Tensor<Float>(env.max_action_val)
+print(max_action)
+let actor_net: ActorNetwork = ActorNetwork(observationSize: env.state_size, actionSize: env.action_size, hiddenLayerSizes: [400, 300], maximum_action:max_action)
+let actor_target: ActorNetwork = ActorNetwork(observationSize: env.state_size, actionSize: env.action_size, hiddenLayerSizes: [400, 300], maximum_action:max_action)
+let critic_net: CriticNetwork = CriticNetwork(state_size: env.state_size, action_size: env.action_size, hiddenLayerSizes: [400, 300], outDimension: 1)
+let critic_target: CriticNetwork = CriticNetwork(state_size: env.state_size, action_size: env.action_size, hiddenLayerSizes: [400, 300], outDimension: 1)
 let actor_critic: ActorCritic = ActorCritic(actor: actor_net,
                                             actor_target: actor_target,
                                             critic: critic_net,
                                             critic_target: critic_target,
-                                            stateSize: 3, actionSize: 1, gamma: 0.99)
+                                            stateSize: env.state_size, actionSize: env.action_size, gamma: 0.99)
 Context.local.learningPhase = .training
 let(totalRewards, movingAvgReward, actor_losses, critic_losses)
   = ddpg(actor_critic: actor_critic,
         env: env,
         maxEpisodes: 1500,
         batchSize: 32,
-        stepsPerEpisode: 200,
+        stepsPerEpisode: 1600,
         tau: 0.005,
-        update_every: 50,
+        update_every: 30,
         epsilonStart: 0.99,
         epsilonDecay: 150)
 
-evaluate_agent(agent: actor_critic, env: env, num_steps: 300, filename: "results/ddpg_pendulum_frames_huberloss.npy")
+evaluate_agent(agent: actor_critic, env: env, num_steps: 1600, filename: "results/ddpg_walker_frames.npy")
 
 //plot results
 plt.plot(totalRewards)
-plt.title("DDPG on Pendulum-v0 Rewards")
+plt.title("DDPG on BipedalWalker-v2 Rewards")
 plt.xlabel("Episode")
 plt.ylabel("Total Reward")
-plt.savefig("results/rewards/pendulum-ddpgreward-huberloss.png")
+plt.savefig("results/rewards/walker-ddpgreward-huberloss.png")
 plt.clf()
 let totalRewards_arr = np.array(totalRewards)
-np.save("results/rewards/pendulum-ddpgreward-huberloss.npy", totalRewards)
+np.save("results/rewards/walker-ddpgreward-huberloss.npy", totalRewards)
 // Save smoothed learning curve
 let runningMeanWindow: Int = 10
 let smoothedEpisodeReturns = np.convolve(
   totalRewards, np.ones((runningMeanWindow)) / np.array(runningMeanWindow, dtype: np.int32),
   mode: "same")
 plt.plot(movingAvgReward)
-plt.title("DDPG on Pendulum-v0 Avg Rewards")
+plt.title("DDPG on BipedalWalker-v2 Avg Rewards")
 plt.xlabel("Episode")
 plt.ylabel("Smoothed Episode Reward")
-plt.savefig("results/rewards/pendulum-ddpgsmoothedreward-huberloss.png")
+plt.savefig("results/rewards/walker-ddpgsmoothedreward-huberloss.png")
 plt.clf()
 let avgRewards_arr = np.array(movingAvgReward)
-np.save("results/rewards/pendulum-ddpgavgreward-huberloss.npy", avgRewards_arr)
+np.save("results/rewards/walker-ddpgavgreward-huberloss.npy", avgRewards_arr)
 
 //save actor and critic losses
 plt.plot(critic_losses)
-plt.title("DDPG on Pendulum-v0 critic losses")
+plt.title("DDPG on BipedalWalker-v2 critic losses")
 plt.xlabel("Episode")
 plt.ylabel("TD Loss")
-plt.savefig("results/losses/ddpg-critic-losses-huberloss.png")
+plt.savefig("results/losses/walker-ddpg-critic-losses-huberloss.png")
 plt.clf()
 
 
 plt.plot(actor_losses)
-plt.title("DDPG on Pendulum-v0 actor losses")
+plt.title("DDPG on BipedalWalker-v2actor losses")
 plt.xlabel("Episode")
 plt.ylabel("Loss")
-plt.savefig("results/losses/ddpg-actor-losses-huberloss.png")
+plt.savefig("results/losses/walker-ddpg-actor-losses-huberloss.png")
 plt.clf()
