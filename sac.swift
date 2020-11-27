@@ -480,7 +480,7 @@ class SoftActorCritic {
 
   let alpha_lr : Float
 
- //let alpha_optimizer: Adam<Tensor<Float>>
+  //let alpha_optimizer: Adam<Tensor<Float>>
 
   init (
     actor: GaussianActorNetwork,
@@ -638,8 +638,8 @@ class SoftActorCritic {
     //   let actor_output = self.actor_network(states)
     //   let logp_pi : Tensor<Float> = actor_output[2]
     //   let target_value = withoutDerivative(at: logp_pi + self.target_alpha)
-    //   let output : Tensor<Float> = self.alpha_net(target_value)
-    //   let loss = -1.0 * output.mean(alongAxes: -1)
+    //   let output : Tensor<Float> = alpha_net(target_value)
+    //   let loss = -1.0 * output.mean()
     //   return loss
 
     // }
@@ -802,7 +802,7 @@ func evaluate_agent(agent: SoftActorCritic, env: TensorFlowEnvironmentWrapper, n
   }
   env.originalEnv.close()
   let frame_np_array = np.array(frames)
-  np.save("results/sac_pendulum_frames_3.npy", frame_np_array)
+  np.save("results/sac_pendulum_frames_4.npy", frame_np_array)
   print("\n Total Reward: \(totalReward)")
 }
 
@@ -811,17 +811,17 @@ func evaluate_agent(agent: SoftActorCritic, env: TensorFlowEnvironmentWrapper, n
 let env = TensorFlowEnvironmentWrapper(gym.make("Pendulum-v0"))
 env.set_environment_seed(seed: 2001)
 let max_action: Tensor<Float> = Tensor<Float>(2.0)
-let actor_net: GaussianActorNetwork = GaussianActorNetwork(state_size: env.state_size, action_size: env.action_size, hiddenLayerSizes: [400, 300], maximum_action:max_action)
-let critic_q1: CriticQNetwork = CriticQNetwork(state_size: env.state_size, action_size: env.action_size, hiddenLayerSizes: [400, 300], outDimension: 1)
+let actor_net: GaussianActorNetwork = GaussianActorNetwork(state_size: env.state_size, action_size: env.action_size, hiddenLayerSizes: [300, 200], maximum_action:max_action)
+let critic_q1: CriticQNetwork = CriticQNetwork(state_size: env.state_size, action_size: env.action_size, hiddenLayerSizes: [300, 200], outDimension: 1)
 //let critic_q2: CriticQNetwork = CriticQNetwork(state_size: 3, action_size: 1, hiddenLayerSizes: [300, 200], outDimension: 1)
-let critic_v: CriticVNetwork = CriticVNetwork(state_size: env.state_size, hiddenLayerSizes:[400, 300], outDimension: 1)
-let critic_v_target: CriticVNetwork = CriticVNetwork(state_size: env.state_size, hiddenLayerSizes:[400, 300], outDimension: 1)
+let critic_v: CriticVNetwork = CriticVNetwork(state_size: env.state_size, hiddenLayerSizes:[300, 200], outDimension: 1)
+let critic_v_target: CriticVNetwork = CriticVNetwork(state_size: env.state_size, hiddenLayerSizes:[300, 200], outDimension: 1)
 
 let actor_critic: SoftActorCritic = SoftActorCritic(actor: actor_net,
                                                     critic_1: critic_q1,
                                                     critic_v: critic_v,
                                                     critic_v_target: critic_v_target,
-                                                    stateSize: 3, actionSize: 1, alpha: 0.20, gamma: 0.99)
+                                                    stateSize: 3, actionSize: 1, alpha: 0.25, gamma: 0.99)
 Context.local.learningPhase = .training
 let(totalRewards, movingAvgReward, actor_losses, critic_1_losses, value_losses)
   = sac_train(actor_critic: actor_critic,
@@ -830,7 +830,7 @@ let(totalRewards, movingAvgReward, actor_losses, critic_1_losses, value_losses)
         batchSize: 32,
         stepsPerEpisode: 200,
         tau: 0.005,
-        update_every: 100,
+        update_every: 75,
         epsilonStart: 0.99,
         epsilonDecay: 150)
 
@@ -840,10 +840,10 @@ plt.plot(totalRewards)
 plt.title("SAC on Pendulum-v0 Rewards")
 plt.xlabel("Episode")
 plt.ylabel("Total Reward")
-plt.savefig("results/rewards/pendulum-sacreward-3.png")
+plt.savefig("results/rewards/pendulum-sacreward-4.png")
 plt.clf()
 let totalRewards_arr = np.array(totalRewards)
-np.save("results/rewards/pendulum-sacreward-3.npy", totalRewards)
+np.save("results/rewards/pendulum-sacreward-4.npy", totalRewards)
 
 // Save smoothed learning curve
 let runningMeanWindow: Int = 10
@@ -854,18 +854,18 @@ plt.plot(movingAvgReward)
 plt.title("SAC on Pendulum-v0 Average Rewards")
 plt.xlabel("Episode")
 plt.ylabel("Smoothed Episode Reward")
-plt.savefig("results/rewards/pendulum-sacsmoothedreward-3.png")
+plt.savefig("results/rewards/pendulum-sacsmoothedreward-4.png")
 plt.clf()
 
 let avgRewards_arr = np.array(movingAvgReward)
-np.save("results/rewards/pendulum-sacavgreward-3.npy", avgRewards_arr)
+np.save("results/rewards/pendulum-sacavgreward-4.npy", avgRewards_arr)
 
 //save actor and critic losses
 plt.plot(critic_1_losses)
 plt.title("SAC on Pendulum-v0 critic losses")
 plt.xlabel("Episode")
 plt.ylabel("TD Loss")
-plt.savefig("results/losses/sac-critic-losses-3.png")
+plt.savefig("results/losses/sac-critic-losses-4.png")
 plt.clf()
 
 
@@ -873,14 +873,14 @@ plt.plot(actor_losses)
 plt.title("SAC on Pendulum-v0 actor losses")
 plt.xlabel("Episode")
 plt.ylabel("Loss")
-plt.savefig("results/losses/sac-actor-losses-3.png")
+plt.savefig("results/losses/sac-actor-losses-4.png")
 plt.clf()
 
 plt.plot(value_losses)
 plt.title("SAC on Pendulum-v0 Value Network losses")
 plt.xlabel("Episode")
 plt.ylabel("Loss")
-plt.savefig("results/losses/sac-value-losses-3.png")
+plt.savefig("results/losses/sac-value-losses-4.png")
 plt.clf()
 
 Context.local.learningPhase = .inference

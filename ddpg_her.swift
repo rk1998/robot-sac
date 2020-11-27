@@ -2,6 +2,7 @@
 ///Hindsight Experience Replay
 /// This implementation uses swift for Tensorflow and borrows ideas from
 /// the swift-models repository: https://github.com/tensorflow/swift-models/
+/// This code is also based off of an implementation of the algorithm in python : https://github.com/TianhongDai/hindsight-experience-replay
 /// Original Paper:  https://arxiv.org/pdf/1707.01495.pdf
 /// Swift for TensorFlow: https://github.com/tensorflow/swift
 /// Author: Rohith Krishnan
@@ -58,32 +59,39 @@ extension Tensor where Scalar: TensorFlowFloatingPoint {
 }
 
 
-//Taken from the DQN example in the tensorflow swift-models repo
+//Environment wrapper for a multi goal environment from Open Ai Gym
+//Based on env wrapper from the DQN example in the tensorflow swift-models repo
 //: https://github.com/tensorflow/swift-models/blob/master/Gym/DQN/main.swift
 class MultiGoalEnvironmentWrapper {
   let originalEnv: PythonObject
   public let state_size: Int
   public let action_size: Int
   public let max_action_val: Float
+  public let goal_size: Int
+  public let max_timesteps: Int
 
   init(_ env: PythonObject) {
     self.originalEnv = env
-    self.state_size = Int(env.observation_space.shape[0])!
+    let state = self.originalEnv.reset()
+    let observation = state["observation"]
+    let desired_goal = state["desired_goal"]
+    self.state_size = Int(observation.shape[0])!
     self.action_size = Int(env.action_space.shape[0])!
-    self.max_action_val = Int(env.action_space.high[0])!
+    self.max_action_val = Float(env.action_space.high[0])!
+    self.goal_size = Int(desired_goal.shape[0])!
+    self.max_timesteps = Int(env._max_episode_steps)!
   }
 
-  func reset() -> (state: Tensor<Float>, achieved_goal: Tensor<Float>, desired_goal: Tensor<Float> {
+  func reset() -> (state: Tensor<Float>, achieved_goal: Tensor<Float>, desired_goal: Tensor<Float>) {
     let state = self.originalEnv.reset()
     let observation = state["observation"]
     let achieved_goal = state["achieved_goal"]
     let desired_goal = state["desired_goal"]
-    return (Tensor<Float>(numpy: np.array(observation, dtype: np.float32))!, Tensor<Float>(numpy: np.array(achieved_goal, dtype: np.float32))!, Tensor<Float>(numpy: np.array(desired_goal, dtype: np.float32))!
+    return (Tensor<Float>(numpy: np.array(observation, dtype: np.float32))!, Tensor<Float>(numpy: np.array(achieved_goal, dtype: np.float32))!, Tensor<Float>(numpy: np.array(desired_goal, dtype: np.float32))!)
   }
 
   func step(_ action: Tensor<Float>) -> (
-    state: Tensor<Float>, achieved_goal: Tensor<Float>, desired_goal: Tensor<Float>, reward: Tensor<Float>, isDone: Tensor<Bool>, info: PythonObject
-  ) {
+    state: Tensor<Float>, achieved_goal: Tensor<Float>, desired_goal: Tensor<Float>, reward: Tensor<Float>, isDone: Tensor<Bool>, info: PythonObject) {
     let (state, reward, isDone, info) = originalEnv.step(action.makeNumpyArray()).tuple4
     let observation = state["observation"]
     let achieved_goal = state["achieved_goal"]
@@ -103,9 +111,14 @@ class MultiGoalEnvironmentWrapper {
   func compute_reward(achieved_goal: Tensor<Float>, goal: Tensor<Float>) -> Tensor<Float> {
     let achieved_goal_np = achieved_goal.makeNumpyArray()
     let goal_np = goal.makeNumpyArray()
-    let reward = self.originalEnv.compute_reward(achieved_goal, goal, "sparse")
+    let reward = self.originalEnv.compute_reward(achieved_goal_np, goal_np, "sparse")
     let tfReward = Tensor<Float>(numpy: np.array(reward, dtype: np.float32))!
     return tfReward
+  }
+
+  func compute_reward_np(achieved_goal: PythonObject, goal: PythonObject) -> PythonObject {
+    let reward = self.originalEnv.compute_reward(achieved_goal, goal, "sparse")
+    return reward
   }
 
   func action_sample() -> Tensor<Float> {
@@ -116,6 +129,9 @@ class MultiGoalEnvironmentWrapper {
 }
 
 
+//Sampling Method for Hindsight Experience Replay
+//Based on Python implementation found here:
+//https://github.com/TianhongDai/hindsight-experience-replay
 class HERSampler {
 
   let replay_length: Int
@@ -123,25 +139,44 @@ class HERSampler {
 
   init(replay_length: Int) {
     self.replay_length = replay_length
-    self.future_p = 1.0 - (1.0 /Float(1 + self.replay_length))
+    self.future_p = 1.0 - (1.0/Float(1 + self.replay_length))
   }
 
-  func sample_transitions(episode_batch: [Tensor<Float>] batch_size:Int) -> (
-    stateBatch: Tensor<Float>,
-    actionBatch: Tensor<Float>,
-    rewardBatch: Tensor<Float>,
-    nextStateBatch: Tensor<Float>,
-    isDoneBatch: Tensor<Bool>
-    ) {
+  func sample_transitions(episode_batch: [String : Tensor<Float>], batch_size:Int, env: MultiGoalEnvironmentWrapper) -> [String: Tensor<Float>] {
+    let timesteps = PythonObject(episode_batch["state"]!.shape[1])
+    let roll_out_batch_size = PythonObject(episode_batch["state"]!.shape[0])
+    let episode_idxs = np.random.randint(0, roll_out_batch_size, batch_size)
+    let t_samples = np.random.randint(timesteps, size: batch_size)
+    var transitions: [String : PythonObject] = [:]
+    for (key, batch_list) in episode_batch {
+      let np_list = batch_list.makeNumpyArray()
+      let transition_sample = np_list[episode_idxs, t_samples]
+      transitions[key] = transition_sample
+    }
+    let her_indexes = np.where(np.random.uniform(size: batch_size) < PythonObject(self.future_p))
+    let future_offset = (np.random.uniform(size: batch_size) * (timesteps - t_samples)).astype(np.int32)
+    let future_t = (t_samples + 1 + future_offset)[her_indexes]
+    let ag_numpy = episode_batch["achieved_goal"]!.makeNumpyArray()
+    let future_ag = ag_numpy[episode_idxs[her_indexes], future_t]
+    transitions["desired_goal"]![her_indexes] = future_ag
+    transitions["reward"] = np.expand_dims(env.compute_reward_np(achieved_goal: transitions["achieved_goal_next"]!, goal: transitions["desired_goal"]!), 1)
+    var transitions_tf : [String: Tensor<Float>] = [:]
+    for (key, batch_list) in transitions {
+      let reshaped_list = batch_list.reshape(batch_size, batch_list.shape[1])
+      transitions_tf[key] = Tensor<Float>(numpy:reshaped_list)!
+    }
+    return transitions_tf
+
   }
 
 
 }
 
 
-
+//Replay Buffer for Hindsight Experience Replay
+//Based off of python implementation found here:
+//https://github.com/TianhongDai/hindsight-experience-replay
 class HERReplayBuffer {
-  let buffer_size: Int
 
   let max_timesteps: Int
 
@@ -153,23 +188,33 @@ class HERReplayBuffer {
 
   var num_transitions: Int
 
-  let sampler : HERSampler
+  let sampler: HERSampler
+
+  let state_size: Int
+
+  let goal_size: Int
+
+  let action_size: Int
 
 
 
-  @noDerivative var buffers : [String : PythonObject]
+  @noDerivative var buffers : [String : [Tensor<Float>]] = [:]
 
   init(max_timesteps: Int, max_buffer_size: Int, state_size: Int, goal_size: Int, action_size: Int) {
     self.max_timesteps = max_timesteps
     self.max_size = max_buffer_size
     self.current_size = 0
     self.num_transitions = 0
+    self.state_size = state_size
+    self.action_size = action_size
+    self.goal_size = goal_size
     self.sample_size = Int(max_buffer_size/max_timesteps)
     self.sampler = HERSampler(replay_length: 4)
-    self.buffers = ["state" : [Tensor<Float>],
-                    "achieved_goal" : [Tensor<Float>],
-                    "desired_goal" : [Tensor<Float>],
-                    "actions" : [Tensor<Float>]]
+
+    self.buffers = ["state" : [],
+                    "achieved_goal" : [],
+                    "desired_goal" : [],
+                    "actions" : []]
   }
 
   func remember(episode_batch: [[Tensor<Float>]]) {
@@ -177,140 +222,41 @@ class HERReplayBuffer {
     let achieved_goals = episode_batch[1]
     let desired_goals = episode_batch[2]
     let actions = episode_batch[3]
-    let count : Int = self.buffer["state"].count
+    let count : Int = buffers["state"]!.count
     if count >= self.max_size {
       // Erase oldest SARS if the replay buffer is full
-      self.buffer["state"].removeFirst()
-      self.buffer["achieved_goal"].removeFirst()
-      self.buffer["desired_goal"].removeFirst()
-      self.buffer["actions"].removeFirst()
+      buffers["state"]!.removeFirst()
+      buffers["achieved_goal"]!.removeFirst()
+      buffers["desired_goal"]!.removeFirst()
+      buffers["actions"]!.removeFirst()
     }
     for i in 0..<episode_batch[0].count {
-      self.buffer["state"].append(states[i])
-      self.buffer["achieved_goal"].append(achieved_goals[i])
-      self.buffer["desired_goal"].append(desired_goals[i])
-      self.buffer["actions"].append(actions[i])
+      buffers["state"]!.append(states[i])
+      buffers["achieved_goal"]!.append(achieved_goals[i])
+      buffers["desired_goal"]!.append(desired_goals[i])
+      buffers["actions"]!.append(actions[i])
+      current_size += 1
     }
 
 
   }
 
-  func sample_batch(batch_size: Int) -> (
-    stateBatch: Tensor<Float>,
-    goalBatch: Tensor<Float>,
-    actionBatch: Tensor<Float>,
-    rewardBatch: Tensor<Float>,
-    nextStateBatch: Tensor<Float>,
-    isDoneBatch: Tensor<Bool>
-  ) {
+  func sample_batch(batch_size: Int, env: MultiGoalEnvironmentWrapper) -> [String : Tensor<Float>] {
+    var temp_buffer: [String : Tensor<Float>] = [:]
+    for (batch_type, batch) in buffers {
+      temp_buffer[batch_type] = Tensor<Float>(batch)
+    }
+    let state_count : Int = buffers["state"]!.count
+    temp_buffer["state_next"] = temp_buffer["state"]![0..<state_count, 1..<self.max_timesteps + 1, 0..<self.state_size]
+    temp_buffer["achieved_goal_next"] = temp_buffer["state"]![0..<state_count, 1..<self.max_timesteps + 1, 0..<self.goal_size]
+    let batch = self.sampler.sample_transitions(episode_batch: temp_buffer, batch_size: batch_size, env: env)
+    return batch
 
   }
 
 
 
 }
-
-
-//Taken From https://github.com/tensorflow/swift-models/blob/master/Gym/DQN/ReplayBuffer.swift
-// Replay buffer to store the agent's experiences.
-///
-/// Vanilla Q-learning only trains on the latest experience. Deep Q-network uses
-/// a technique called "experience replay", where all experience is stored into
-/// a replay buffer. By storing experience, the agent can reuse the experiences
-/// and also train in batches. For more information, check Human-level control
-/// through deep reinforcement learning (Mnih et al., 2015).
-class ReplayBuffer {
-  /// The maximum size of the replay buffer. When the replay buffer is full,
-  /// new elements replace the oldest element in the replay buffer.
-  let capacity: Int
-  /// If enabled, uses Combined Experience Replay (CER) sampling instead of the
-  /// uniform random sampling in the original DQN paper. Original DQN samples
-  /// batch uniformly randomly in the replay buffer. CER always includes the
-  /// most recent element and samples the rest of the batch uniformly randomly.
-  /// This makes the agent more robust to different replay buffer capacities.
-  /// For more information about Combined Experience Replay, check A Deeper Look
-  /// at Experience Replay (Zhang and Sutton, 2017).
-  let combined: Bool
-
-  /// The states that the agent observed.
-  @noDerivative var states: [Tensor<Float>] = []
-
-  @noDerivative var achieved_goals: [Tensor<Float>] = []
-
-  @noDerivative var desired_goals: [Tensor<Float>] = []
-  /// The actions that the agent took.
-  @noDerivative var actions: [Tensor<Float>] = []
-  /// The rewards that the agent received from the environment after taking
-  /// an action.
-  @noDerivative var rewards: [Tensor<Float>] = []
-  /// The next states that the agent received from the environment after taking
-  /// an action.
-  @noDerivative var nextStates: [Tensor<Float>] = []
-  /// The episode-terminal flag that the agent received after taking an action.
-  @noDerivative var isDones: [Tensor<Bool>] = []
-  /// The current size of the replay buffer.
-  var count: Int { return states.count }
-
-  init(capacity: Int, combined: Bool) {
-    self.capacity = capacity
-    self.combined = combined
-  }
-
-  func append(
-    state: Tensor<Float>,
-    achieved_goal: Tensor<Float>,
-    desired_goal: Tensor<Float>,
-    action: Tensor<Float>,
-    reward: Tensor<Float>,
-    nextState: Tensor<Float>,
-    isDone: Tensor<Bool>
-  ) {
-    if count >= capacity {
-      // Erase oldest SARS if the replay buffer is full
-      states.removeFirst()
-      achieved_goals.removeFirst()
-      desired_goals.removeFirst()
-      actions.removeFirst()
-      rewards.removeFirst()
-      nextStates.removeFirst()
-      isDones.removeFirst()
-    }
-    states.append(state)
-    achieved_goals.append(achieved_goal)
-    desired_goals.append(desired_goal)
-    actions.append(action)
-    rewards.append(reward)
-    nextStates.append(nextState)
-    isDones.append(isDone)
-  }
-
-  func sample(batchSize: Int) -> (
-    stateBatch: Tensor<Float>,
-    actionBatch: Tensor<Float>,
-    rewardBatch: Tensor<Float>,
-    nextStateBatch: Tensor<Float>,
-    isDoneBatch: Tensor<Bool>
-  ) {
-    let indices: Tensor<Int32>
-    if self.combined == true {
-      // Combined Experience Replay
-      let sampledIndices = (0..<batchSize - 1).map { _ in Int32.random(in: 0..<Int32(count)) }
-      indices = Tensor<Int32>(shape: [batchSize], scalars: sampledIndices + [Int32(count) - 1])
-    } else {
-      // Vanilla Experience Replay
-      let sampledIndices = (0..<batchSize).map { _ in Int32.random(in: 0..<Int32(count)) }
-      indices = Tensor<Int32>(shape: [batchSize], scalars: sampledIndices)
-    }
-    let stateBatch = Tensor(stacking: states).gathering(atIndices: indices, alongAxis: 0)
-    let actionBatch = Tensor(stacking: actions).gathering(atIndices: indices, alongAxis: 0)
-    let rewardBatch = Tensor(stacking: rewards).gathering(atIndices: indices, alongAxis: 0)
-    let nextStateBatch = Tensor(stacking: nextStates).gathering(atIndices: indices, alongAxis: 0)
-    let isDoneBatch = Tensor(stacking: isDones).gathering(atIndices: indices, alongAxis: 0)
-
-    return (stateBatch, actionBatch, rewardBatch, nextStateBatch, isDoneBatch)
-  }
-}
-
 
 
 struct CriticNetwork: Layer {
@@ -419,7 +365,7 @@ class ActorCritic {
 
   public var target_actor_network: ActorNetwork
 
-  public var replayBuffer: ReplayBuffer
+  public var replayBuffer: HERReplayBuffer
 
   //let action_noise: GaussianNoise<Float>
   let action_noise: OUNoise
@@ -430,17 +376,24 @@ class ActorCritic {
 
   let action_size: Int
 
+  let goal_size: Int
+
   let actor_optimizer: Adam<ActorNetwork>
 
   let critic_optimizer: Adam<CriticNetwork>
+
+  let max_action: Tensor<Float>
 
   init (
     actor: ActorNetwork,
     actor_target: ActorNetwork,
     critic: CriticNetwork,
     critic_target: CriticNetwork,
+    replay_buff: HERReplayBuffer,
     stateSize: Int,
     actionSize: Int,
+    goalSize: Int,
+    maxAction: Tensor<Float>,
     critic_lr: Float = 0.00009,
     actor_lr: Float = 0.0001,
     gamma: Float = 0.95) {
@@ -456,24 +409,30 @@ class ActorCritic {
       //self.action_noise = GaussianNoise(standardDeviation: 0.20)
       self.state_size = stateSize
       self.action_size = actionSize
+      self.goal_size = goalSize
+      self.max_action = maxAction
       self.actor_optimizer = Adam(for: self.actor_network, learningRate: actor_lr)
       self.critic_optimizer = Adam(for: self.critic_network, learningRate: critic_lr)
-      self.replayBuffer = ReplayBuffer(capacity: 1500, combined: true)
+      self.replayBuffer = replay_buff
   }
 
-  func remember(state: Tensor<Float>, action: Tensor<Float>, reward: Tensor<Float>, next_state: Tensor<Float>, dones: Tensor<Bool>) {
-    self.replayBuffer.append(state:state, action:action, reward:reward, nextState:next_state, isDone:dones)
+  func remember(episode_batch: [[Tensor<Float>]]) {
+    self.replayBuffer.remember(episode_batch: episode_batch)
   }
 
-  func get_action(state: Tensor<Float>, env: TensorFlowEnvironmentWrapper, training: Bool) -> Tensor<Float> {
-
+  func get_action(state: Tensor<Float>, goal: Tensor<Float>, env: MultiGoalEnvironmentWrapper, training: Bool) -> Tensor<Float> {
     let tfState = Tensor<Float>(numpy: np.expand_dims(state.makeNumpyArray(), axis: 0))!
-    let net_action: Tensor<Float> = self.actor_network(tfState)
+    let tfGoal = Tensor<Float>(numpy: np.expand_dims(goal.makeNumpyArray(), axis: 0))!
+    //normalize the state and the desired goal
+    let normed_state : Tensor<Float> = ((tfState - tfState.mean(alongAxes: 0))/tfState.standardDeviation(alongAxes: 0)).clipped(min: -5.0, max: 5.0)
+    let normed_goal : Tensor<Float> = ((tfGoal - tfGoal.mean(alongAxes: 0))/tfGoal.standardDeviation(alongAxes: 0)).clipped(min: -5.0, max: 5.0)
+    let state_input : Tensor<Float> = Tensor<Float>(concatenating: [normed_state, normed_goal], alongAxis : 1)
+    let net_action: Tensor<Float> = self.actor_network(state_input)
     if training {
       let noise = self.action_noise.getNoise()
       let noisy_action = net_action + noise
       //let noisy_action = self.action_noise(net_action)
-      let action = noisy_action.clipped(min:-2.0, max:2.0)
+      let action = noisy_action.clipped(min:-self.max_action, max:self.max_action)
       return action[0]
     } else {
       return net_action[0]
@@ -481,31 +440,52 @@ class ActorCritic {
 
   }
 
-  func train_actor_critic(batchSize: Int, iterationNum: Int) -> (Float, Float) {
+  func train_actor_critic(batchSize: Int, env: MultiGoalEnvironmentWrapper) -> (Float, Float) {
 
-    let (states, actions, rewards, nextstates, dones) = self.replayBuffer.sample(batchSize: batchSize)
+    let episode_batch: [String: Tensor<Float>] = self.replayBuffer.sample_batch(batch_size: batchSize, env: env)
+
+    let states: Tensor<Float> = episode_batch["state"]!
+    let nextstates: Tensor<Float> = episode_batch["state_next"]!
+    let desired_goal: Tensor<Float> = episode_batch["desired_goal"]!
+    let actions: Tensor<Float> = episode_batch["actions"]!
+    let rewards: Tensor<Float> = episode_batch["reward"]!
+
+    //normalize states and the desired goals
+    let norm_states: Tensor<Float> = ((states - states.mean(alongAxes: 0))/states.standardDeviation(alongAxes: 0)).clipped(min: -5.0, max: 5.0)
+    let norm_nextstates: Tensor<Float> = ((nextstates - nextstates.mean(alongAxes: 0))/nextstates.standardDeviation(alongAxes: 0)).clipped(min: -5.0, max: 5.0)
+    let norm_desired_goal: Tensor<Float> = ((desired_goal - desired_goal.mean(alongAxes: 0))/desired_goal.standardDeviation(alongAxes: 0)).clipped(min: -5.0, max: 5.0)
+
+    //concatenate states and goals for the network inputs
+    let inputs: Tensor<Float> = Tensor<Float>(concatenating: [norm_states, norm_desired_goal], alongAxis: 1)
+    let inputs_next: Tensor<Float> = Tensor<Float>(concatenating: [norm_nextstates, norm_desired_goal], alongAxis:1)
+
+
+
     //train critic
     let(critic_loss, critic_gradients) = valueWithGradient(at: self.critic_network) { critic_network -> Tensor<Float> in
       //get target q values from target critic network
-      let next_state_q_values: Tensor<Float> = self.target_critic_network([nextstates, self.target_actor_network(nextstates)]).flattened()
-      let target_q_values: Tensor<Float> =  rewards + self.gamma * (1 - Tensor<Float>(dones)) * next_state_q_values
+      let next_state_q_values: Tensor<Float> = self.target_critic_network([inputs_next, self.target_actor_network(nextstates)]).flattened()
+      let target_q_values: Tensor<Float> =  rewards + self.gamma * next_state_q_values
       //get predicted q values from critic network
       let target_q_values_no_deriv : Tensor<Float> = withoutDerivative(at: target_q_values)
       let predicted_q_values: Tensor<Float> = critic_network([states, actions]).flattened()
-      //let td_error: Tensor<Float> = target_q_values_no_deriv - predicted_q_values
+      let td_error: Tensor<Float> = target_q_values_no_deriv - predicted_q_values
       // let td_error: Tensor<Float> = squaredDifference(target_q_values_no_deriv, predicted_q_values)
       // let td_loss: Tensor<Float> = td_error.mean()
-      //let td_loss: Tensor<Float> = 0.5*pow(td_error, 2).mean()
-      //return td_loss
-      return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 5.0).mean()
+      let td_loss: Tensor<Float> = 0.5*pow(td_error, 2).mean()
+      return td_loss
+      //return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 5.0).mean()
     }
     self.critic_optimizer.update(&self.critic_network, along: critic_gradients)
+
     //train actor
     let(actor_loss, actor_gradients) = valueWithGradient(at: self.actor_network) { actor_network -> Tensor<Float> in
         //let next_actions = actor_network(states)
-        let critic_q_values: Tensor<Float> = self.critic_network([states, actor_network(states)]).flattened()
+        let next_actions = actor_network(inputs)
+        let critic_q_values: Tensor<Float> = self.critic_network([inputs, next_actions]).flattened()
         let loss: Tensor<Float> = Tensor<Float>(-1.0) * critic_q_values.mean()
-        return loss
+        let reg_loss: Tensor<Float> = 0.5*pow((next_actions/self.max_action), 2).mean()
+        return loss + reg_loss
     }
     self.actor_optimizer.update(&self.actor_network, along: actor_gradients)
     return (actor_loss.scalarized(), critic_loss.scalarized())
@@ -549,3 +529,144 @@ class ActorCritic {
   }
 
  }
+
+
+
+func evaluate_agent(agent: ActorCritic, env: MultiGoalEnvironmentWrapper, num_rollouts: Int = 3, num_steps: Int = 50) -> Float {
+  var total_success_rate: [Tensor<Float>] = []
+  var totalReward: Float = 0.0
+  for _ in 0..<num_rollouts {
+    var rollout_success_rate: [Float] = []
+    var (observation, _, desired_g) = env.reset()
+    for _ in 0..<num_steps {
+      let action = agent.get_action(state: observation, goal: desired_g, env: env, training: false)
+      let (next_state, _, desired_g_next, _, _, info) = env.step(action)
+      observation = next_state
+      desired_g = desired_g_next
+      rollout_success_rate.append(Float(info["is_success"])!)
+
+    }
+    let rollouts_tf : Tensor<Float> = Tensor<Float>(rollout_success_rate)
+    total_success_rate.append(rollouts_tf)
+  }
+
+  let total_success_rate_tf : Tensor<Float> = Tensor<Float>(total_success_rate)
+  totalReward = total_success_rate_tf.mean().scalarized()
+  return totalReward
+
+}
+
+func ddpg_her(actor_critic: ActorCritic, env: MultiGoalEnvironmentWrapper,
+          epochs: Int = 50, episodes: Int = 50, rollouts: Int = 2,
+          stepsPerEpisode: Int = 300, update_steps: Int = 30, batchSize: Int = 32, tau: Float = 0.001,
+          update_every: Int = 1) ->([Float], [Float], [Float])  {
+
+    // var totalRewards: [Float] = []
+    // var movingAverageReward: [Float] = []
+    var total_actor_losses: [Float] = []
+    var total_critic_losses: [Float] = []
+    var success_rates: [Float] = []
+    //var bestReward: Float = -99999999.0
+    //var sample_random_action: Bool = true
+    //var training: Bool = false
+    //let sampling_episodes: Int = 100
+    actor_critic.updateCriticTargetNetwork(tau: 1.0)
+    actor_critic.updateActorTargetNetwork(tau: 1.0)
+    print("Starting Training\n")
+    for epoch in 0..<epochs {
+      print("\nEPOCH: \(epoch)")
+      var actor_losses: [Float] = []
+      var critic_losses: [Float] = []
+      for i in 0..<episodes {
+        print("\nEPISODE: \(i)")
+        var mb_obs : [Tensor<Float>] = []
+        var mb_ag : [Tensor<Float>] = []
+        var mb_g : [Tensor<Float>] = []
+        var mb_actions : [Tensor<Float>] = []
+        for _ in 0..<rollouts {
+          var ep_obs : [Tensor<Float>] = []
+          var ep_ag : [Tensor<Float>] = []
+          var ep_g : [Tensor<Float>] = []
+          var ep_actions : [Tensor<Float>] = []
+
+          var (observation, achieved_g, desired_g) = env.reset()
+          var t : Int = 0
+          while t < stepsPerEpisode {
+            let action: Tensor<Float> = actor_critic.get_action(state: observation, goal: desired_g, env: env, training: true)
+            let (obs_next, ag_next, _, _, _, _) = env.step(action)
+            ep_obs.append(observation)
+            ep_ag.append(achieved_g)
+            ep_g.append(desired_g)
+            ep_actions.append(action)
+            observation = obs_next
+            achieved_g = ag_next
+            t += 1
+          }
+          ep_obs.append(observation)
+          ep_ag.append(achieved_g)
+          let episode_obs_tf : Tensor<Float> = Tensor<Float>(stacking: ep_obs)
+          let episode_ag_tf : Tensor<Float> = Tensor<Float>(stacking: ep_ag)
+          let episode_g_tf : Tensor<Float> = Tensor<Float>(stacking: ep_g)
+          let episode_actions_tf : Tensor<Float> = Tensor<Float>(stacking: ep_actions)
+          mb_obs.append(episode_obs_tf)
+          mb_ag.append(episode_ag_tf)
+          mb_g.append(episode_g_tf)
+          mb_actions.append(episode_actions_tf)
+        }
+        actor_critic.remember(episode_batch: [mb_obs, mb_ag, mb_g, mb_actions])
+        var actor_loss_total : Float = 0.0
+        var critic_loss_total : Float = 0.0
+        for _ in 0..<update_steps {
+          let(a_loss, c_loss) = actor_critic.train_actor_critic(batchSize: batchSize, env: env)
+          actor_loss_total += a_loss
+          critic_loss_total += c_loss
+        }
+        actor_losses.append(actor_loss_total/Float(update_steps))
+        critic_losses.append(critic_loss_total/Float(update_steps))
+        if i % update_every == 0 {
+          actor_critic.updateActorTargetNetwork(tau: tau)
+          actor_critic.updateCriticTargetNetwork(tau: tau)
+        }
+
+      }
+      let avg_actor_loss = Tensor<Float>(actor_losses).mean().scalarized()
+      let avg_critic_loss = Tensor<Float>(critic_losses).mean().scalarized()
+      total_actor_losses.append(avg_actor_loss)
+      total_critic_losses.append(avg_critic_loss)
+      print("Evaluating\n")
+      let eval_success_rate = evaluate_agent(agent: actor_critic, env: env, num_rollouts: 3, num_steps:stepsPerEpisode)
+      success_rates.append(eval_success_rate)
+
+    }
+
+    return (total_actor_losses, total_critic_losses, success_rates)
+
+ }
+
+
+let env = MultiGoalEnvironmentWrapper(gym.make("FetchPush-v1"))
+print(env.state_size)
+print(env.action_size)
+env.set_environment_seed(seed: 1001)
+let max_action: Tensor<Float> = Tensor<Float>(env.max_action_val)
+let actor_net: ActorNetwork = ActorNetwork(observationSize: env.state_size + env.goal_size, actionSize: env.action_size, hiddenLayerSizes: [400, 300], maximum_action:max_action)
+let actor_target: ActorNetwork = ActorNetwork(observationSize: env.state_size + env.goal_size, actionSize: env.action_size, hiddenLayerSizes: [400, 300], maximum_action:max_action)
+let critic_net: CriticNetwork = CriticNetwork(state_size: env.state_size + env.goal_size,  action_size: 1, hiddenLayerSizes: [400, 300], outDimension: 1)
+let critic_target: CriticNetwork = CriticNetwork(state_size: env.state_size + env.goal_size, action_size: 1, hiddenLayerSizes: [400, 300], outDimension: 1)
+let replay_buffer: HERReplayBuffer = HERReplayBuffer(max_timesteps: env.max_timesteps, max_buffer_size: 10000, state_size: env.state_size, goal_size: env.goal_size, action_size: env.action_size)
+
+
+let actor_critic: ActorCritic = ActorCritic(actor: actor_net,
+                                            actor_target: actor_target,
+                                            critic: critic_net,
+                                            critic_target: critic_target,
+                                            replay_buff: replay_buffer,
+                                            stateSize: env.state_size,
+                                            actionSize: env.action_size,
+                                            goalSize: env.goal_size,
+                                            maxAction: max_action)
+
+
+
+
+
