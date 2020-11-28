@@ -285,6 +285,7 @@ class OUNoise {
 }
 
 //Actor Critic Agent
+//Actor Critic Agent
 class ActorCritic {
 
 
@@ -318,7 +319,7 @@ class ActorCritic {
     critic_target: CriticNetwork,
     stateSize: Int,
     actionSize: Int,
-    critic_lr: Float = 0.0001,
+    critic_lr: Float = 0.0003,
     actor_lr: Float = 0.0001,
     gamma: Float = 0.95) {
       self.actor_network = actor
@@ -326,16 +327,16 @@ class ActorCritic {
       self.target_critic_network = critic_target
       self.target_actor_network = actor_target
       self.gamma = gamma
-      let mu : Tensor<Float> = Tensor<Float>(0.0)
-      let sigma : Tensor<Float> = Tensor<Float>(0.25)
-      let x_init: Tensor<Float> = Tensor<Float>(0.00)
+      let mu : Tensor<Float> = Tensor<Float>([0.0, 0.0, 0.0, 0.0])
+      let sigma : Tensor<Float> = Tensor<Float>([0.2, 0.2, 0.2, 0.2])
+      let x_init: Tensor<Float> = Tensor<Float>([0.0, 0.0, 0.0, 0.0])
       self.action_noise = OUNoise(mu: mu, sigma: sigma, x_init: x_init, theta: 0.15, dt: 0.05)
       //self.action_noise = GaussianNoise(standardDeviation: 0.20)
       self.state_size = stateSize
       self.action_size = actionSize
       self.actor_optimizer = Adam(for: self.actor_network, learningRate: actor_lr)
       self.critic_optimizer = Adam(for: self.critic_network, learningRate: critic_lr)
-      self.replayBuffer = ReplayBuffer(capacity: 3000, combined: true)
+      self.replayBuffer = ReplayBuffer(capacity: 4000, combined: true)
   }
 
   func remember(state: Tensor<Float>, action: Tensor<Float>, reward: Tensor<Float>, next_state: Tensor<Float>, dones: Tensor<Bool>) {
@@ -369,7 +370,11 @@ class ActorCritic {
       //get predicted q values from critic network
       let target_q_values_no_deriv : Tensor<Float> = withoutDerivative(at: target_q_values)
       let predicted_q_values: Tensor<Float> = critic_network([states, actions]).flattened()
-      return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 3.0).mean()
+      // let td_error = target_q_values_no_deriv - predicted_q_values
+      // let td_loss = 0.5*(pow(td_error, 2)).mean()
+      // return td_loss
+
+      return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 5.5).mean()
     }
     self.critic_optimizer.update(&self.critic_network, along: critic_gradients)
     //train actor
@@ -423,6 +428,25 @@ class ActorCritic {
  }
 
 
+func evaluate_agent(agent: ActorCritic, env: TensorFlowEnvironmentWrapper, num_steps: Int = 300, filename: String = "results/frames.npy") {
+  var frames: [PythonObject] = []
+  var state = env.reset()
+  var totalReward: Float = 0.0
+  for _ in 0..<num_steps {
+    let frame = env.originalEnv.render(mode: "rgb_array")
+    frames.append(frame)
+    let action = agent.get_action(state: state, env: env, training: false)
+    let (next_state, reward, _, _) = env.step(action)
+    let scalar_reward = reward.scalarized()
+    //print("\nStep Reward: \(scalar_reward)")
+    totalReward += scalar_reward
+    state = next_state
+  }
+  env.originalEnv.close()
+  let frame_np_array = np.array(frames)
+  np.save(filename, frame_np_array)
+  print("\n Total Reward: \(totalReward)")
+}
 
 //Deep Deterministic Policy Gradient Algorithm
 func ddpg(actor_critic: ActorCritic, env: TensorFlowEnvironmentWrapper,
@@ -442,6 +466,13 @@ func ddpg(actor_critic: ActorCritic, env: TensorFlowEnvironmentWrapper,
     actor_critic.updateActorTargetNetwork(tau: 1.0)
     for i in 0..<maxEpisodes {
       print("\nEpisode: \(i)")
+
+      if i == 250 || i == 500 || i == 1000 {
+        print("Evaluating agent")
+        let filename: String  = "results/ddpg_walker_eval_" + String(i) + ".npy"
+        evaluate_agent(agent:actor_critic , env:env, num_steps: 1000, filename: filename)
+      }
+
       var state = env.reset()
       //sample random actions for the first few episodes, then start using actor network w/ noise
       if i == sampling_episodes {
@@ -520,38 +551,16 @@ func ddpg(actor_critic: ActorCritic, env: TensorFlowEnvironmentWrapper,
 }
 
 
-
-func evaluate_agent(agent: ActorCritic, env: TensorFlowEnvironmentWrapper, num_steps: Int = 300, filename: String = "results/frames.npy") {
-  var frames: [PythonObject] = []
-  var state = env.reset()
-  var totalReward: Float = 0.0
-  for _ in 0..<num_steps {
-    let frame = env.originalEnv.render(mode: "rgb_array")
-    frames.append(frame)
-    let action = agent.get_action(state: state, env: env, training: false)
-    let (next_state, reward, _, _) = env.step(action)
-    let scalar_reward = reward.scalarized()
-    print("\nStep Reward: \(scalar_reward)")
-    totalReward += scalar_reward
-    state = next_state
-  }
-  env.originalEnv.close()
-  let frame_np_array = np.array(frames)
-  np.save(filename, frame_np_array)
-  print("\n Total Reward: \(totalReward)")
-}
-
 let env = TensorFlowEnvironmentWrapper(gym.make("BipedalWalker-v2"))
 print(env.state_size)
 print(env.action_size)
-print(env.originalEnv._max_episode_steps)
 env.set_environment_seed(seed: 1001)
 let max_action: Tensor<Float> = Tensor<Float>(env.max_action_val)
 print(max_action)
-let actor_net: ActorNetwork = ActorNetwork(observationSize: env.state_size, actionSize: env.action_size, hiddenLayerSizes: [400, 300], maximum_action:max_action)
-let actor_target: ActorNetwork = ActorNetwork(observationSize: env.state_size, actionSize: env.action_size, hiddenLayerSizes: [400, 300], maximum_action:max_action)
-let critic_net: CriticNetwork = CriticNetwork(state_size: env.state_size, action_size: env.action_size, hiddenLayerSizes: [400, 300], outDimension: 1)
-let critic_target: CriticNetwork = CriticNetwork(state_size: env.state_size, action_size: env.action_size, hiddenLayerSizes: [400, 300], outDimension: 1)
+let actor_net: ActorNetwork = ActorNetwork(observationSize: env.state_size, actionSize: env.action_size, hiddenLayerSizes: [500, 400], maximum_action:max_action)
+let actor_target: ActorNetwork = ActorNetwork(observationSize: env.state_size, actionSize: env.action_size, hiddenLayerSizes: [500, 400], maximum_action:max_action)
+let critic_net: CriticNetwork = CriticNetwork(state_size: env.state_size, action_size: env.action_size, hiddenLayerSizes: [500, 400], outDimension: 1)
+let critic_target: CriticNetwork = CriticNetwork(state_size: env.state_size, action_size: env.action_size, hiddenLayerSizes: [500, 400], outDimension: 1)
 let actor_critic: ActorCritic = ActorCritic(actor: actor_net,
                                             actor_target: actor_target,
                                             critic: critic_net,
@@ -563,9 +572,9 @@ let(totalRewards, movingAvgReward, actor_losses, critic_losses)
         env: env,
         maxEpisodes: 1500,
         batchSize: 32,
-        stepsPerEpisode: 1600,
+        stepsPerEpisode: 900,
         tau: 0.005,
-        update_every: 30,
+        update_every: 225,
         epsilonStart: 0.99,
         epsilonDecay: 150)
 
@@ -604,7 +613,7 @@ plt.clf()
 
 
 plt.plot(actor_losses)
-plt.title("DDPG on BipedalWalker-v2actor losses")
+plt.title("DDPG on BipedalWalker-v2 actor losses")
 plt.xlabel("Episode")
 plt.ylabel("Loss")
 plt.savefig("results/losses/walker-ddpg-actor-losses-huberloss.png")
