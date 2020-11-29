@@ -598,7 +598,7 @@ func ddpg_her(actor_critic: ActorCritic, env: MultiGoalEnvironmentWrapper,
     for epoch in 0..<epochs {
       print("\nEPOCH: \(epoch)")
       if epoch == 0 || epoch == 10 || epoch == 50 {
-        let filename: String = "results/fetch_push_ddpg_her_ep" + String(epoch) + ".npy"
+        let filename: String = "results/fetch_reach_ddpg_her_ep" + String(epoch) + ".npy"
         test_agent(agent: actor_critic, env: env, num_steps: 50, filename: filename)
       }
       var actor_losses: [Float] = []
@@ -676,26 +676,27 @@ func ddpg_her(actor_critic: ActorCritic, env: MultiGoalEnvironmentWrapper,
 func test_agent(agent: ActorCritic, env: MultiGoalEnvironmentWrapper, num_steps: Int = 300, filename: String = "results/frames.npy") {
   var frames: [PythonObject] = []
   var (observation, _, desired_g) = env.reset()
-
+  var success: [Float] = []
   for _ in 0..<num_steps {
     let frame = env.originalEnv.render(mode: "rgb_array")
     frames.append(frame)
     let action = agent.get_action(state: observation, goal: desired_g, env: env, training: false)
-    let (next_state, _, desired_g_next, _, _, _) = env.step(action)
+    let (next_state, _, desired_g_next, _, _, info) = env.step(action)
     //let scalar_reward = reward.scalarized()
     //print("\nStep Reward: \(scalar_reward)")
     //totalReward += scalar_reward
+    success.append(Float(info["is_success"])!)
     observation = next_state
     desired_g = desired_g_next
   }
   env.originalEnv.close()
   let frame_np_array = np.array(frames)
   np.save(filename, frame_np_array)
-  //print("\n Total Reward: \(totalReward)")
+  print("\n Is success: \(success[num_steps - 1])")
 }
 
 
-let env = MultiGoalEnvironmentWrapper(gym.make("FetchPush-v1"))
+let env = MultiGoalEnvironmentWrapper(gym.make("FetchReach-v1"))
 print(env.state_size)
 print(env.action_size)
 print(env.max_timesteps)
@@ -730,28 +731,28 @@ let(actor_losses, critic_losses, success_rates) = ddpg_her(actor_critic: actor_c
                                                            update_every: 10)
 
 plt.plot(success_rates)
-plt.title("DDPG+HER Success Rate on FetchPush-v1")
+plt.title("DDPG+HER Success Rate on FetchReach-v1")
 plt.xlabel("Epoch")
 plt.ylabel("Eval. Success Rate")
-plt.savefig("results/rewards/fetch_push_success_ddpg_her_2.png")
+plt.savefig("results/rewards/fetch_reach_success_ddpg_her_2.png")
 plt.clf()
 
 
 plt.plot(actor_losses)
-plt.title("DDPG+HER Avg. Actor Loss on FetchPush-v1")
+plt.title("DDPG+HER Avg. Actor Loss on FetchReach-v1")
 plt.xlabel("Epoch")
 plt.ylabel("Avg. Loss")
-plt.savefig("results/losses/fetch_push_actor_loss_ddpg_her_2.png")
+plt.savefig("results/losses/fetch_reach_actor_loss_ddpg_her_2.png")
 plt.clf()
 
 plt.plot(critic_losses)
 plt.title("DDPG+HER Avg. Critic Loss on FetchPush-v1")
 plt.xlabel("Epoch")
 plt.ylabel("Avg. Loss")
-plt.savefig("results/losses/fetch_push_critic_loss_ddpg_her_2.png")
+plt.savefig("results/losses/fetch_reach_critic_loss_ddpg_her_2.png")
 plt.clf()
 
-test_agent(agent: actor_critic, env: env, num_steps: 60, filename: "results/fetch_push_ddpg_her_1.npy")
+test_agent(agent: actor_critic, env: env, num_steps: 60, filename: "results/fetch_reach_ddpg_her.npy")
 
 
 
