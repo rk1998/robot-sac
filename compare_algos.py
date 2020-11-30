@@ -8,7 +8,7 @@ def plot_reward_results(algo_1_arr, algo_2_arr, algo_1_name, algo_2_name, title=
     plt.figure()
     plt.plot(algo_1_arr, "-b", label=algo_1_name)
     plt.plot(algo_2_arr, "-r", label=algo_2_name)
-    figure_title = algo_1_name + " vs " + algo_2_name + " average rewards during training"
+    figure_title = algo_1_name + " vs " + algo_2_name + " " + title
     plt.title(figure_title)
     plt.xlabel("Episode")
     plt.ylabel("Reward")
@@ -30,8 +30,8 @@ def main():
     # algo_1_name = sys.argv[2]
     # algo_1_arr = np.load(algo_1_file)
     # plot_results(algo_1_arr, algo_1_name)
-    if len(sys.argv) < 5:
-        print("Usage: python compare_algos.py <algo 1 reward file> <algo 2 reward file> <algo 1 name> <algo 2 name>")
+    if len(sys.argv) < 6:
+        print("Usage: python compare_algos.py <algo 1 reward file> <algo 2 reward file> <algo 1 name> <algo 2 name> <title>")
         exit()
 
 
@@ -39,9 +39,11 @@ def main():
     algo_2_file = sys.argv[2]
     algo_1_name = sys.argv[3]
     algo_2_name = sys.argv[4]
+    title = sys.argv[5]
     algo_1_arr = np.load(algo_1_file)
     algo_2_arr = np.load(algo_2_file)
-    plot_reward_results(algo_1_arr, algo_2_arr, algo_1_name, algo_2_name)
+    algo_2_arr[13:] = 0.0
+    plot_reward_results(algo_1_arr, algo_2_arr, algo_1_name, algo_2_name, title=title)
 
 if __name__ == '__main__':
     main()

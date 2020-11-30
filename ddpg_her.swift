@@ -154,14 +154,16 @@ class HERSampler {
       transitions[key] = transition_sample
     }
     let batch_uniform  = np.random.uniform(size: PythonObject(batch_size))
-    var her_indexes_sf: [Int] = []
-    for i in 0..<batch_size{
-      let val = batch_uniform[i]
-      if Float(val)! < self.future_p {
-        her_indexes_sf.append(i)
-      }
-    }
-    let her_indexes = np.array(her_indexes_sf)
+    let batch_uniform_filter: PythonObject = batch_uniform < self.future_p
+    let her_indexes = np.where(batch_uniform_filter)
+    // var her_indexes_sf: [Int] = []
+    // for i in 0..<batch_size{
+    //   let val = batch_uniform[i]
+    //   if Float(val)! < self.future_p {
+    //     her_indexes_sf.append(i)
+    //   }
+    // }
+    // let her_indexes = np.array(her_indexes_sf)
     let future_offset = (np.random.uniform(size: batch_size) * (timesteps - t_samples)).astype(np.int32)
     let future_t = (t_samples + 1 + future_offset)[her_indexes]
     let ag_numpy = episode_batch["achieved_goal"]!.makeNumpyArray()
@@ -451,8 +453,8 @@ class ActorCritic {
     actionSize: Int,
     goalSize: Int,
     maxAction: Tensor<Float>,
-    critic_lr: Float = 0.0001,
-    actor_lr: Float = 0.0001,
+    critic_lr: Float = 0.0009,
+    actor_lr: Float = 0.0009,
     gamma: Float = 0.99) {
       self.actor_network = actor
       self.critic_network = critic
@@ -690,7 +692,7 @@ func ddpg_her(actor_critic: ActorCritic, env: MultiGoalEnvironmentWrapper,
     for epoch in 0..<epochs {
       print("\nEPOCH: \(epoch)")
       if epoch == 0 || epoch == 25 || epoch == 50 || epoch == 75 {
-        let filename: String = "results/fetch_push_ddpg_her_3_ep" + String(epoch) + ".npy"
+        let filename: String = "results/fetch_push_ddpg_her_4_ep" + String(epoch) + ".npy"
         test_agent(agent: actor_critic, env: env, num_steps: 60, filename: filename)
       }
       var actor_losses: [Float] = []
@@ -795,10 +797,10 @@ print(env.max_timesteps)
 env.set_environment_seed(seed: 1001)
 let max_action: Tensor<Float> = Tensor<Float>(env.max_action_val)
 print(max_action)
-let actor_net: ActorNetwork = ActorNetwork(observationSize: env.state_size + env.goal_size, actionSize: env.action_size, hiddenLayerSizes: [256, 256, 256], maximum_action:max_action)
-let actor_target: ActorNetwork = ActorNetwork(observationSize: env.state_size + env.goal_size, actionSize: env.action_size, hiddenLayerSizes: [256, 256, 256], maximum_action:max_action)
-let critic_net: CriticNetwork = CriticNetwork(state_size: env.state_size + env.goal_size,  action_size: env.action_size, hiddenLayerSizes: [256, 256, 256], outDimension: 1)
-let critic_target: CriticNetwork = CriticNetwork(state_size: env.state_size + env.goal_size, action_size: env.action_size, hiddenLayerSizes: [256, 256, 256], outDimension: 1)
+let actor_net: ActorNetwork = ActorNetwork(observationSize: env.state_size + env.goal_size, actionSize: env.action_size, hiddenLayerSizes: [400, 300, 200], maximum_action:max_action)
+let actor_target: ActorNetwork = ActorNetwork(observationSize: env.state_size + env.goal_size, actionSize: env.action_size, hiddenLayerSizes: [400, 300, 200], maximum_action:max_action)
+let critic_net: CriticNetwork = CriticNetwork(state_size: env.state_size + env.goal_size,  action_size: env.action_size, hiddenLayerSizes: [400, 300, 200], outDimension: 1)
+let critic_target: CriticNetwork = CriticNetwork(state_size: env.state_size + env.goal_size, action_size: env.action_size, hiddenLayerSizes: [400, 300, 200], outDimension: 1)
 let replay_buffer: HERReplayBuffer = HERReplayBuffer(max_timesteps: env.max_timesteps, max_buffer_size: 9000, state_size: env.state_size, goal_size: env.goal_size, action_size: env.action_size)
 
 
@@ -815,7 +817,7 @@ let(actor_losses, critic_losses, success_rates) = ddpg_her(actor_critic: actor_c
                                                            env: env,
                                                            epochs: 60,
                                                            episodes: 50,
-                                                           rollouts: 3,
+                                                           rollouts: 4,
                                                            stepsPerEpisode: env.max_timesteps,
                                                            update_steps: 50,
                                                            batchSize: 128,
@@ -826,27 +828,27 @@ plt.plot(success_rates)
 plt.title("DDPG+HER Success Rate on FetchPush-v1")
 plt.xlabel("Epoch")
 plt.ylabel("Eval. Success Rate")
-plt.savefig("results/rewards/fetch_push_success_ddpg_her_3.png")
+plt.savefig("results/rewards/fetch_push_success_ddpg_her_4.png")
 plt.clf()
 let success_rates_np = np.array(success_rates)
-np.save("results/rewards/fetch_push_success_ddpg_her.npy", success_rates_np)
+np.save("results/rewards/fetch_push_success_ddpg_her_4.npy", success_rates_np)
 
 
 plt.plot(actor_losses)
 plt.title("DDPG+HER Avg. Actor Loss on FetchPush-v1")
 plt.xlabel("Epoch")
 plt.ylabel("Avg. Loss")
-plt.savefig("results/losses/fetch_push_actor_loss_ddpg_her_3.png")
+plt.savefig("results/losses/fetch_push_actor_loss_ddpg_her_4.png")
 plt.clf()
 
 plt.plot(critic_losses)
 plt.title("DDPG+HER Avg. Critic Loss on FetchPush-v1")
 plt.xlabel("Epoch")
 plt.ylabel("Avg. Loss")
-plt.savefig("results/losses/fetch_push_critic_loss_ddpg_her_3.png")
+plt.savefig("results/losses/fetch_push_critic_loss_ddpg_her_4.png")
 plt.clf()
 
-test_agent(agent: actor_critic, env: env, num_steps: 60, filename: "results/fetch_push_ddpg_her_3.npy")
+test_agent(agent: actor_critic, env: env, num_steps: 60, filename: "results/fetch_push_ddpg_her_4.npy")
 
 
 
