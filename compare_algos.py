@@ -16,10 +16,24 @@ def plot_reward_results(algo_1_arr, algo_2_arr, algo_1_name, algo_2_name, title=
     plt.show()
 
 
+def plot_results(algo_1_arr, algo_1_name, title="Avg Reward"):
+    plt.figure()
+    plt.plot(algo_1_arr, "-b")
+    plt.title(algo_1_name + " reward on Pendulum-v0")
+    plt.xlabel("Episode")
+    plt.ylabel("Reward")
+    plt.show()
+
+
 def main():
+    # algo_1_file = sys.argv[1]
+    # algo_1_name = sys.argv[2]
+    # algo_1_arr = np.load(algo_1_file)
+    # plot_results(algo_1_arr, algo_1_name)
     if len(sys.argv) < 5:
         print("Usage: python compare_algos.py <algo 1 reward file> <algo 2 reward file> <algo 1 name> <algo 2 name>")
         exit()
+
 
     algo_1_file = sys.argv[1]
     algo_2_file = sys.argv[2]

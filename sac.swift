@@ -245,7 +245,9 @@ struct GaussianActorNetwork: Layer {
 
     //public var batch_norm : BatchNorm<Float>
 
-    public var layer_1, layer_2, out_mean, out_log_std: Dense<Float>
+    public var layer_1, layer_2, out_mean : Dense<Float>
+
+    public var out_log_std : Tensor<Float>
 
     public var dim: Tensor<Float>
 
@@ -264,7 +266,8 @@ struct GaussianActorNetwork: Layer {
         self.layer_1 = Dense<Float>(inputSize: state_size, outputSize: hiddenLayerSizes[0], activation: relu)
         self.layer_2 = Dense<Float>(inputSize: hiddenLayerSizes[0], outputSize: hiddenLayerSizes[1], activation: relu)
         self.out_mean = Dense<Float>(inputSize: hiddenLayerSizes[1], outputSize: action_size, activation:identity)
-        self.out_log_std = Dense<Float>(inputSize: hiddenLayerSizes[1], outputSize: action_size, activation:identity)
+        //self.out_log_std = Dense<Float>(inputSize: hiddenLayerSizes[1], outputSize: action_size, activation:identity)
+        self.out_log_std = -0.5*Tensor<Float>(ones: TensorShape([action_size]))
         self.dist = DiagonalGaussian(dimension: action_size)
         self.max_action = maximum_action
     }
@@ -292,8 +295,10 @@ struct GaussianActorNetwork: Layer {
         let h1 = layer_1(input)
         let h2 = layer_2(h1)
         let mu = out_mean(h2)
-        let log_std = out_log_std(h2)
-        let clipped_log_std: Tensor<Float> = log_std.clipped(min: self.log_sig_min, max:self.log_sig_max)
+        let log_std: Tensor<Float> = out_log_std.expandingShape(at: 0).tiled(multiples: [mu.shape[0], 1])
+       // let log_std = out_log_std(h2)
+        //let clipped_log_std: Tensor<Float> = log_std.clipped(min: self.log_sig_min, max:self.log_sig_max)
+        let clipped_log_std: Tensor<Float> = log_std
         //During training we sample from a Diagonal Gaussian.
         //During testing we can just take our mean as our raw actions
         let raw_actions_testing: Tensor<Float> = mu
@@ -529,7 +534,7 @@ class SoftActorCritic {
       self.critic_v_optimizer = Adam(for: self.critic_v_network, learningRate: critic_v_lr)
       self.alpha_optimizer = Adam(for: self.alpha_net, learningRate:0.0001)
 
-      self.replayBuffer = ReplayBuffer(capacity: 10000, combined: false)
+      self.replayBuffer = ReplayBuffer(capacity: 2000, combined: true)
   }
 
   func remember(state: Tensor<Float>, action: Tensor<Float>, reward: Tensor<Float>, next_state: Tensor<Float>, dones: Tensor<Bool>) {
@@ -713,7 +718,7 @@ func sac_train(actor_critic: SoftActorCritic, env: TensorFlowEnvironmentWrapper,
       var totalCriticQ1Loss: Float = 0
       var totalValueLoss: Float = 0
       var totalTrainingSteps: Int = 0
-      for _ in 0..<stepsPerEpisode {
+      for j in 0..<stepsPerEpisode {
 
         var action: Tensor<Float>
         //Sample random action or take action from actor depending on epsilon
@@ -731,25 +736,7 @@ func sac_train(actor_critic: SoftActorCritic, env: TensorFlowEnvironmentWrapper,
           actor_critic.remember(state:state, action:action, reward:reward, next_state:nextState, dones:isDone)
         }
 
-        // if actor_critic.replayBuffer.count > batchSize && training{
-        //   totalTrainingSteps += 1
-        //   //Train Actor and Critic Networks
-        //   let(actor_loss, critic_q1_loss, value_loss) = actor_critic.train_actor_critic(batchSize: batchSize, iterationNum: j)
-        //   totalActorLoss += actor_loss
-        //   totalCriticQ1Loss += critic_q1_loss
-        //   //totalCriticQ2Loss += critic_q2_loss
-        //   totalValueLoss += value_loss
-        // }
-
-        // if j % update_every == 0 {
-        //     actor_critic.updateValueTargetNetwork(tau: tau)
-        // }
-
-        state = nextState
-      }
-      totalRewards.append(totalReward)
-      if actor_critic.replayBuffer.count > batchSize && training {
-        for _ in 0..<50 {
+        if actor_critic.replayBuffer.count > batchSize && training{
           totalTrainingSteps += 1
           //Train Actor and Critic Networks
           let(actor_loss, critic_q1_loss, value_loss) = actor_critic.train_actor_critic(batchSize: batchSize)
@@ -757,15 +744,32 @@ func sac_train(actor_critic: SoftActorCritic, env: TensorFlowEnvironmentWrapper,
           totalCriticQ1Loss += critic_q1_loss
           //totalCriticQ2Loss += critic_q2_loss
           totalValueLoss += value_loss
-
         }
 
-        if i % update_every == 0 {
-          actor_critic.updateValueTargetNetwork(tau: tau)
+        if j % update_every == 0 {
+            actor_critic.updateValueTargetNetwork(tau: tau)
         }
 
+        state = nextState
       }
+      totalRewards.append(totalReward)
+      // if actor_critic.replayBuffer.count > batchSize && training {
+      //   for _ in 0..<200 {
+      //     totalTrainingSteps += 1
+      //     //Train Actor and Critic Networks
+      //     let(actor_loss, critic_q1_loss, value_loss) = actor_critic.train_actor_critic(batchSize: batchSize)
+      //     totalActorLoss += actor_loss
+      //     totalCriticQ1Loss += critic_q1_loss
+      //     //totalCriticQ2Loss += critic_q2_loss
+      //     totalValueLoss += value_loss
 
+      //   }
+
+      //   if i % update_every == 0 {
+      //     actor_critic.updateValueTargetNetwork(tau: tau)
+      //   }
+
+      // }
 
       if totalRewards.count < 10 {
         var sum: Float = 0.0
@@ -857,10 +861,10 @@ let(totalRewards, movingAvgReward, actor_losses, critic_1_losses, value_losses)
   = sac_train(actor_critic: actor_critic,
         env: env,
         maxEpisodes: 1500,
-        batchSize: 128,
+        batchSize: 32,
         stepsPerEpisode: 200,
         tau: 0.005,
-        update_every: 5,
+        update_every: 20,
         epsilonStart: 0.99,
         epsilonDecay: 150)
 
@@ -870,10 +874,10 @@ plt.plot(totalRewards)
 plt.title("SAC on Pendulum-v0 Rewards")
 plt.xlabel("Episode")
 plt.ylabel("Total Reward")
-plt.savefig("results/rewards/pendulum-sacreward-5.png")
+plt.savefig("results/rewards/pendulum-sacreward-6.png")
 plt.clf()
 let totalRewards_arr = np.array(totalRewards)
-np.save("results/rewards/pendulum-sacreward-5.npy", totalRewards)
+np.save("results/rewards/pendulum-sacreward-6.npy", totalRewards)
 
 // Save smoothed learning curve
 let runningMeanWindow: Int = 10
@@ -884,18 +888,18 @@ plt.plot(movingAvgReward)
 plt.title("SAC on Pendulum-v0 Average Rewards")
 plt.xlabel("Episode")
 plt.ylabel("Smoothed Episode Reward")
-plt.savefig("results/rewards/pendulum-sacsmoothedreward-5.png")
+plt.savefig("results/rewards/pendulum-sacsmoothedreward-6.png")
 plt.clf()
 
 let avgRewards_arr = np.array(movingAvgReward)
-np.save("results/rewards/pendulum-sacavgreward-5.npy", avgRewards_arr)
+np.save("results/rewards/pendulum-sacavgreward-6.npy", avgRewards_arr)
 
 //save actor and critic losses
 plt.plot(critic_1_losses)
 plt.title("SAC on Pendulum-v0 critic losses")
 plt.xlabel("Episode")
 plt.ylabel("TD Loss")
-plt.savefig("results/losses/sac-critic-losses-5.png")
+plt.savefig("results/losses/sac-critic-losses-6.png")
 plt.clf()
 
 
@@ -903,14 +907,14 @@ plt.plot(actor_losses)
 plt.title("SAC on Pendulum-v0 actor losses")
 plt.xlabel("Episode")
 plt.ylabel("Loss")
-plt.savefig("results/losses/sac-actor-losses-5.png")
+plt.savefig("results/losses/sac-actor-losses-6.png")
 plt.clf()
 
 plt.plot(value_losses)
 plt.title("SAC on Pendulum-v0 Value Network losses")
 plt.xlabel("Episode")
 plt.ylabel("Loss")
-plt.savefig("results/losses/sac-value-losses-5.png")
+plt.savefig("results/losses/sac-value-losses-6.png")
 plt.clf()
 
 Context.local.learningPhase = .training

@@ -324,6 +324,46 @@ struct ActorNetwork: Layer {
 
 }
 
+
+class Normalizer {
+
+  public let eps: Float
+  public var total_sum: Tensor<Float>
+  public var total_sumsq: Tensor<Float>
+  public var total_count: Tensor<Float>
+  public var mean: Tensor<Float>
+  public var std: Tensor<Float>
+
+  init(size: Int, epsilon: Float = 0.01) {
+    self.eps = epsilon
+    self.total_sum = Tensor<Float>(zeros: TensorShape(size))
+    self.total_sumsq = Tensor<Float>(zeros: TensorShape(size))
+    self.total_count = Tensor<Float>(1.0)
+    self.mean = Tensor<Float>(zeros: TensorShape(size))
+    self.std = Tensor<Float>(zeros: TensorShape(size))
+  }
+
+  func update(val: Tensor<Float>) {
+    self.total_sum = self.total_sum + val.sum(alongAxes: 0)
+    self.total_sumsq = self.total_sumsq + pow(val, 2).sum(alongAxes: 0)
+    self.total_count = self.total_count + Tensor<Float>(Float(val.shape[0]))
+  }
+
+  func recompute_stats() {
+    self.mean = self.total_sum/self.total_count
+    let sum_sq: Tensor<Float> = (self.total_sumsq/self.total_count) - pow((self.total_sumsq/self.total_count), 2)
+    self.std = sqrt(max(pow(Tensor<Float>(eps), 2), sum_sq))
+  }
+
+  func normalize(val: Tensor<Float>) -> Tensor<Float> {
+
+    let result: Tensor<Float> = (val - self.mean)/(self.std + eps)
+    return result
+  }
+
+
+}
+
 //Ornstein Uhlenbeck Noise - Gives Temporally correlated noise that provides better exploration of a physical space
 class OUNoise {
 
@@ -379,6 +419,11 @@ class ActorCritic {
 
   public var replayBuffer: HERReplayBuffer
 
+
+  public var state_normalizer: Normalizer
+
+  public var goal_normalizer: Normalizer
+
   //let action_noise: GaussianNoise<Float>
   let action_noise: OUNoise
 
@@ -406,22 +451,26 @@ class ActorCritic {
     actionSize: Int,
     goalSize: Int,
     maxAction: Tensor<Float>,
-    critic_lr: Float = 0.0009,
-    actor_lr: Float = 0.0009,
-    gamma: Float = 0.95) {
+    critic_lr: Float = 0.0001,
+    actor_lr: Float = 0.0001,
+    gamma: Float = 0.99) {
       self.actor_network = actor
       self.critic_network = critic
       self.target_critic_network = critic_target
       self.target_actor_network = actor_target
       self.gamma = gamma
       let mu : Tensor<Float> = Tensor<Float>(0.0)
-      let sigma : Tensor<Float> = Tensor<Float>(0.25)
+      let sigma : Tensor<Float> = Tensor<Float>(0.20)
       let x_init: Tensor<Float> = Tensor<Float>(0.00)
       self.action_noise = OUNoise(mu: mu, sigma: sigma, x_init: x_init, theta: 0.15, dt: 0.05)
       //self.action_noise = GaussianNoise(standardDeviation: 0.20)
       self.state_size = stateSize
       self.action_size = actionSize
       self.goal_size = goalSize
+
+      self.state_normalizer = Normalizer(size: stateSize)
+      self.goal_normalizer = Normalizer(size: goalSize)
+
       self.max_action = maxAction
       self.actor_optimizer = Adam(for: self.actor_network, learningRate: actor_lr)
       self.critic_optimizer = Adam(for: self.critic_network, learningRate: critic_lr)
@@ -432,12 +481,52 @@ class ActorCritic {
     self.replayBuffer.remember(episode_batch: episode_batch)
   }
 
+  func update_normalizers(batchSize: Int, env: MultiGoalEnvironmentWrapper) {
+    // var buffer: [String: [Tensor<Float>]] = ["state" : [],
+    //                                             "achieved_goal" : [],
+    //                                             "desired_goal" : [],
+    //                                             "actions" : []]
+    // let states = episode_batch[0]
+    // let achieved_goals = episode_batch[1]
+    // let desired_goals = episode_batch[2]
+    // let actions = episode_batch[3]
+    // for i in 0..<episode_batch[0].count {
+    //   buffer["state"]!.append(states[i])
+    //   buffer["achieved_goal"]!.append(achieved_goals[i])
+    //   buffer["desired_goal"]!.append(desired_goals[i])
+    //   buffer["actions"]!.append(actions[i])
+    // }
+
+    // var temp_buffer: [String : Tensor<Float>] = [:]
+    // for (batch_type, batch) in buffer {
+    //   temp_buffer[batch_type] = Tensor<Float>(batch)
+    // }
+    // let state_count : Int = buffer["state"]!.count
+    // temp_buffer["state_next"] = temp_buffer["state"]![0..<state_count, 1..<50 + 1, 0..<self.state_size]
+    // temp_buffer["achieved_goal_next"] = temp_buffer["state"]![0..<state_count, 1..<50 + 1, 0..<self.goal_size]
+
+    let batch = self.replayBuffer.sample_batch(batch_size: batchSize, env: env)
+    let states_sampled: Tensor<Float> = batch["state"]!
+    let goals_sampled: Tensor<Float> = batch["desired_goal"]!
+    self.state_normalizer.update(val: states_sampled)
+    self.goal_normalizer.update(val: goals_sampled)
+
+    self.state_normalizer.recompute_stats()
+    self.goal_normalizer.recompute_stats()
+
+  }
+
   func get_action(state: Tensor<Float>, goal: Tensor<Float>, env: MultiGoalEnvironmentWrapper, training: Bool) -> Tensor<Float> {
     let tfState = Tensor<Float>(numpy: np.expand_dims(state.makeNumpyArray(), axis: 0))!
     let tfGoal = Tensor<Float>(numpy: np.expand_dims(goal.makeNumpyArray(), axis: 0))!
     //normalize the state and the desired goal
-    let normed_state : Tensor<Float> = ((tfState - tfState.mean())/sqrt(tfState.standardDeviation() + 0.0001)).clipped(min: -5.0, max: 5.0)
-    let normed_goal : Tensor<Float> = ((tfGoal - tfGoal.mean())/sqrt(tfGoal.standardDeviation() + 0.0001)).clipped(min: -5.0, max: 5.0)
+    //let normed_state : Tensor<Float> = ((tfState - tfState.mean())/sqrt(tfState.standardDeviation() + 0.0001)).clipped(min: -5.0, max: 5.0)
+    //let normed_goal : Tensor<Float> = ((tfGoal - tfGoal.mean())/sqrt(tfGoal.standardDeviation() + 0.0001)).clipped(min: -5.0, max: 5.0)
+    let normed_state : Tensor<Float> = self.state_normalizer.normalize(val: tfState).clipped(min: -5.0, max: 5.0)
+    let normed_goal : Tensor<Float> = self.goal_normalizer.normalize(val: tfGoal).clipped(min: -5.0, max: 5.0)
+
+
+
     let state_input : Tensor<Float> = Tensor<Float>(concatenating: [normed_state, normed_goal], alongAxis : 1)
     let net_action: Tensor<Float> = self.actor_network(state_input)
     if training {
@@ -463,9 +552,13 @@ class ActorCritic {
     let rewards: Tensor<Float> = episode_batch["reward"]!
 
     //normalize states and the desired goals
-    let norm_states: Tensor<Float> = ((states - states.mean(alongAxes: 0))/sqrt(states.standardDeviation(alongAxes: 0) + 0.00001)).clipped(min: -5.0, max: 5.0)
-    let norm_nextstates: Tensor<Float> = ((nextstates - nextstates.mean(alongAxes: 0))/sqrt(nextstates.standardDeviation(alongAxes: 0) + 0.00001)).clipped(min: -5.0, max: 5.0)
-    let norm_desired_goal: Tensor<Float> = ((desired_goal - desired_goal.mean(alongAxes: 0))/sqrt(desired_goal.standardDeviation(alongAxes: 0) + 0.00001)).clipped(min: -5.0, max: 5.0)
+    // let norm_states: Tensor<Float> = ((states - states.mean())/sqrt(states.standardDeviation() + 0.00001)).clipped(min: -5.0, max: 5.0)
+    // let norm_nextstates: Tensor<Float> = ((nextstates - nextstates.mean())/sqrt(nextstates.standardDeviation() + 0.00001)).clipped(min: -5.0, max: 5.0)
+    // let norm_desired_goal: Tensor<Float> = ((desired_goal - desired_goal.mean())/sqrt(desired_goal.standardDeviation() + 0.00001)).clipped(min: -5.0, max: 5.0)
+
+    let norm_states: Tensor<Float> = self.state_normalizer.normalize(val: states).clipped(min: -5.0, max: 5.0)
+    let norm_nextstates: Tensor<Float> = self.state_normalizer.normalize(val: nextstates).clipped(min: -5.0, max: 5.0)
+    let norm_desired_goal: Tensor<Float> = self.goal_normalizer.normalize(val:desired_goal).clipped(min: -5.0, max: 5.0)
 
     //concatenate states and goals for the network inputs
     let inputs: Tensor<Float> = Tensor<Float>(concatenating: [norm_states, norm_desired_goal], alongAxis: 1)
@@ -481,8 +574,6 @@ class ActorCritic {
       let target_q_values_no_deriv : Tensor<Float> = withoutDerivative(at: target_q_values)
       let predicted_q_values: Tensor<Float> = critic_network([inputs, actions]).flattened()
       let td_error: Tensor<Float> = target_q_values_no_deriv - predicted_q_values
-      // let td_error: Tensor<Float> = squaredDifference(target_q_values_no_deriv, predicted_q_values)
-      // let td_loss: Tensor<Float> = td_error.mean()
       let td_loss: Tensor<Float> = 0.5*pow(td_error, 2).mean()
       return td_loss
       //return huberLoss(predicted: predicted_q_values, expected: target_q_values_no_deriv, delta: 5.0).mean()
@@ -495,8 +586,8 @@ class ActorCritic {
         let next_actions = actor_network(inputs)
         let critic_q_values: Tensor<Float> = self.critic_network([inputs, next_actions]).flattened()
         let loss: Tensor<Float> = Tensor<Float>(-1.0) * critic_q_values.mean()
-        let reg_loss: Tensor<Float> = 0.5*pow((next_actions/self.max_action), 2).mean()
-        return loss + reg_loss
+        //let reg_loss: Tensor<Float> = 0.5*pow((next_actions/self.max_action), 2).mean()
+        return loss
     }
     self.actor_optimizer.update(&self.actor_network, along: actor_gradients)
     return (actor_loss.scalarized(), critic_loss.scalarized())
@@ -571,6 +662,7 @@ func evaluate_agent(agent: ActorCritic, env: MultiGoalEnvironmentWrapper, num_ro
     total_success_rate.append(rollouts_tf)
   }
   let total_success_rate_tf : Tensor<Float> = Tensor<Float>(total_success_rate)
+  //print(total_success_rate_tf)
   let success_rate_tf : Tensor<Float> = total_success_rate_tf[0..<total_success_rate_tf.shape[0], total_success_rate_tf.shape[1] - 1]
   print(success_rate_tf)
   totalReward = success_rate_tf.mean().scalarized()
@@ -597,9 +689,9 @@ func ddpg_her(actor_critic: ActorCritic, env: MultiGoalEnvironmentWrapper,
     print("Starting Training\n")
     for epoch in 0..<epochs {
       print("\nEPOCH: \(epoch)")
-      if epoch == 0 || epoch == 10 || epoch == 50 {
-        let filename: String = "results/fetch_reach_ddpg_her_ep" + String(epoch) + ".npy"
-        test_agent(agent: actor_critic, env: env, num_steps: 50, filename: filename)
+      if epoch == 0 || epoch == 25 || epoch == 50 || epoch == 75 {
+        let filename: String = "results/fetch_push_ddpg_her_3_ep" + String(epoch) + ".npy"
+        test_agent(agent: actor_critic, env: env, num_steps: 60, filename: filename)
       }
       var actor_losses: [Float] = []
       var critic_losses: [Float] = []
@@ -640,6 +732,7 @@ func ddpg_her(actor_critic: ActorCritic, env: MultiGoalEnvironmentWrapper,
           mb_actions.append(episode_actions_tf)
         }
         actor_critic.remember(episode_batch: [mb_obs, mb_ag, mb_g, mb_actions])
+        actor_critic.update_normalizers(batchSize: batchSize, env: env)
         var actor_loss_total : Float = 0.0
         var critic_loss_total : Float = 0.0
         for _ in 0..<update_steps {
@@ -681,10 +774,9 @@ func test_agent(agent: ActorCritic, env: MultiGoalEnvironmentWrapper, num_steps:
     let frame = env.originalEnv.render(mode: "rgb_array")
     frames.append(frame)
     let action = agent.get_action(state: observation, goal: desired_g, env: env, training: false)
-    let (next_state, _, desired_g_next, _, _, info) = env.step(action)
-    //let scalar_reward = reward.scalarized()
-    //print("\nStep Reward: \(scalar_reward)")
-    //totalReward += scalar_reward
+    let (next_state, _, desired_g_next, tfreward, _, info) = env.step(action)
+    let reward : Float = tfreward.scalarized()
+    print("Reward: \(reward)\n")
     success.append(Float(info["is_success"])!)
     observation = next_state
     desired_g = desired_g_next
@@ -696,7 +788,7 @@ func test_agent(agent: ActorCritic, env: MultiGoalEnvironmentWrapper, num_steps:
 }
 
 
-let env = MultiGoalEnvironmentWrapper(gym.make("FetchReach-v1"))
+let env = MultiGoalEnvironmentWrapper(gym.make("FetchPush-v1"))
 print(env.state_size)
 print(env.action_size)
 print(env.max_timesteps)
@@ -707,7 +799,7 @@ let actor_net: ActorNetwork = ActorNetwork(observationSize: env.state_size + env
 let actor_target: ActorNetwork = ActorNetwork(observationSize: env.state_size + env.goal_size, actionSize: env.action_size, hiddenLayerSizes: [256, 256, 256], maximum_action:max_action)
 let critic_net: CriticNetwork = CriticNetwork(state_size: env.state_size + env.goal_size,  action_size: env.action_size, hiddenLayerSizes: [256, 256, 256], outDimension: 1)
 let critic_target: CriticNetwork = CriticNetwork(state_size: env.state_size + env.goal_size, action_size: env.action_size, hiddenLayerSizes: [256, 256, 256], outDimension: 1)
-let replay_buffer: HERReplayBuffer = HERReplayBuffer(max_timesteps: env.max_timesteps, max_buffer_size: 11000, state_size: env.state_size, goal_size: env.goal_size, action_size: env.action_size)
+let replay_buffer: HERReplayBuffer = HERReplayBuffer(max_timesteps: env.max_timesteps, max_buffer_size: 9000, state_size: env.state_size, goal_size: env.goal_size, action_size: env.action_size)
 
 
 let actor_critic: ActorCritic = ActorCritic(actor: actor_net,
@@ -721,38 +813,40 @@ let actor_critic: ActorCritic = ActorCritic(actor: actor_net,
                                             maxAction: max_action)
 let(actor_losses, critic_losses, success_rates) = ddpg_her(actor_critic: actor_critic,
                                                            env: env,
-                                                           epochs: 105,
+                                                           epochs: 60,
                                                            episodes: 50,
                                                            rollouts: 3,
                                                            stepsPerEpisode: env.max_timesteps,
-                                                           update_steps: 40,
+                                                           update_steps: 50,
                                                            batchSize: 128,
-                                                           tau: 0.05,
-                                                           update_every: 10)
+                                                           tau: 0.005,
+                                                           update_every: 5)
 
 plt.plot(success_rates)
-plt.title("DDPG+HER Success Rate on FetchReach-v1")
+plt.title("DDPG+HER Success Rate on FetchPush-v1")
 plt.xlabel("Epoch")
 plt.ylabel("Eval. Success Rate")
-plt.savefig("results/rewards/fetch_reach_success_ddpg_her_2.png")
+plt.savefig("results/rewards/fetch_push_success_ddpg_her_3.png")
 plt.clf()
+let success_rates_np = np.array(success_rates)
+np.save("results/rewards/fetch_push_success_ddpg_her.npy", success_rates_np)
 
 
 plt.plot(actor_losses)
-plt.title("DDPG+HER Avg. Actor Loss on FetchReach-v1")
+plt.title("DDPG+HER Avg. Actor Loss on FetchPush-v1")
 plt.xlabel("Epoch")
 plt.ylabel("Avg. Loss")
-plt.savefig("results/losses/fetch_reach_actor_loss_ddpg_her_2.png")
+plt.savefig("results/losses/fetch_push_actor_loss_ddpg_her_3.png")
 plt.clf()
 
 plt.plot(critic_losses)
 plt.title("DDPG+HER Avg. Critic Loss on FetchPush-v1")
 plt.xlabel("Epoch")
 plt.ylabel("Avg. Loss")
-plt.savefig("results/losses/fetch_reach_critic_loss_ddpg_her_2.png")
+plt.savefig("results/losses/fetch_push_critic_loss_ddpg_her_3.png")
 plt.clf()
 
-test_agent(agent: actor_critic, env: env, num_steps: 60, filename: "results/fetch_reach_ddpg_her.npy")
+test_agent(agent: actor_critic, env: env, num_steps: 60, filename: "results/fetch_push_ddpg_her_3.npy")
 
 
 
