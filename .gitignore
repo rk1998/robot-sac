@@ -1,2 +1,3 @@
 results/*.npy
 results/rewards/*.npy
+results/fetch_robot_results/*.npy
