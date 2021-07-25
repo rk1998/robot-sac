@@ -3,6 +3,7 @@
 - Implementation of [Soft Actor-Critic algorithm by Haarnoja et. al.](https://arxiv.org/abs/1801.01290), [Deep Deterministic Policy Gradients by Lillicrap et. al.](https://arxiv.org/pdf/1509.02971.pdf) and [Hindsight Experience Replay by Andrychowicz et. al](https://arxiv.org/pdf/1707.01495.pdf)
 - Implemented using Swift for Tensorflow, Tested on Open AI: Gym environments
 - [Swift for TensorFlow Repo](https://github.com/tensorflow/swift)
+- [Final Presentation for CS 8903 Class] (https://docs.google.com/presentation/d/1HyajlIzJO8N1kSTTjGVlhQaWTl2v7JcxpiJmDQG4IOs/edit?usp=sharing)
 
 # Deep Deterministic Policy Gradients
 - [DDPG Paper:](https://arxiv.org/pdf/1509.02971.pdf) 
